@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "org.aura-genesis/immaculate",
+  "description": "Hosted Streamable HTTP MCP server for pre-action AI governance verdicts, model routing, and verifiable evidence records.",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/Arobi-Technology-Alliance-Lab/immaculate-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://aura-genesis.org/api/v1/mcp",
+      "headers": [
+        {
+          "name": "X-Arobi-Tenant-Key",
+          "description": "Arobi workspace tenant key (free tier starts with 110 credits at https://aura-genesis.org/immaculate/mcp/)",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
