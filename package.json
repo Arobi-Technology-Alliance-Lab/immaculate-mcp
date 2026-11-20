@@ -1,6 +1,6 @@
 {
   "name": "@arobi/immaculate-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Self-contained MCP server for pre-action AI governance verdicts, policy-aware model routing, and cryptographic Ed25519/SHA-256 evidence chain verification.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",

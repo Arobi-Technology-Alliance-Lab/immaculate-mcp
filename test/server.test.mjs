@@ -261,3 +261,29 @@ test('arobi_verify_chain names the signer and refuses unsigned records, mixed si
   assert.equal(hashOnly.unsigned_count, 2);
   assert.equal(hashOnly.signer_kid, null);
 });
+
+// Agent readiness (2026-11-20): an agent should never have to guess what a parameter means or whether a tool changes
+// anything. Every parameter at every depth is described, and every tool has a title and MCP's behaviour annotations.
+test('every tool is titled and annotated, and every parameter is described', () => {
+  const list = handleJsonRpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  const missing = [];
+  const walk = (properties, path) => {
+    for (const [name, schema] of Object.entries(properties ?? {})) {
+      if (!schema.description?.trim()) missing.push(`${path}.${name}`);
+      walk(schema.properties, `${path}.${name}`);
+      walk(schema.items?.properties, `${path}.${name}[]`);
+    }
+  };
+  for (const tool of list.result.tools) {
+    walk(tool.inputSchema.properties, tool.name);
+    assert.ok(tool.title, `${tool.name} has a title`);
+    for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+      assert.equal(typeof tool.annotations?.[hint], 'boolean', `${tool.name}.${hint}`);
+    }
+  }
+  assert.deepEqual(missing, []);
+  const readOnly = Object.fromEntries(list.result.tools.map((tool) => [tool.name, tool.annotations.readOnlyHint]));
+  assert.deepEqual(readOnly, { arobi_route_grant: false, arobi_authorize: false, arobi_classify_and_route: false, arobi_verify_chain: true });
+  const init = handleJsonRpc({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
+  assert.ok(init.result.serverInfo.title);
+});

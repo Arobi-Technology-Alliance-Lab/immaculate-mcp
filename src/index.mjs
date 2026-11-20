@@ -17,8 +17,13 @@ import { LocalImmaculateEngine } from './engine.mjs';
 
 const SERVER_INFO = {
   name: 'arobi-immaculate-mcp',
-  version: '1.0.0',
+  title: 'Arobi Immaculate MCP (local engine)',
+  version: '1.1.0',
 };
+
+// What each tool does to this server's local chain, for MCP clients that decide by it (behaviour annotations). The
+// writing tools append to the in-memory chain of this run only; nothing outside this process changes.
+const APPENDS_LOCAL_CHAIN = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
 
@@ -28,8 +33,10 @@ const SERVER_INSTRUCTIONS =
 export const TOOL_DEFINITIONS = [
   {
     name: 'arobi_route_grant',
+    title: 'Grant authority to a workflow',
     description:
       'Seal WHO granted WHAT authority to WHICH workflow, with scope, category caps, attenuation, and expiry. Returns a locally Ed25519-signed route_grant and hash-chained ROUTE_GRANT record.',
+    annotations: { title: 'Grant authority to a workflow', ...APPENDS_LOCAL_CHAIN },
     inputSchema: {
       type: 'object',
       properties: {
@@ -62,6 +69,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'arobi_authorize',
+    title: 'Authorize an agent action',
+    annotations: { title: 'Authorize an agent action', ...APPENDS_LOCAL_CHAIN },
     description:
       'Decide whether an agent action is permitted against a route grant this server sealed, and seal a hash-chained AUTHORIZATION record. Returns GRANTED, DENIED, or ESCALATED with checks and reason code. A grant that is unsigned, or signed by any other key, is DENIED; the signing key is made when the server starts, so a grant is good for the run that sealed it.',
     inputSchema: {
@@ -75,11 +84,18 @@ export const TOOL_DEFINITIONS = [
         consequence_tier: {
           type: 'string',
           enum: ['low', 'medium', 'high', 'critical'],
-          description: 'Impact tier of the proposed action.',
+          description:
+            'Impact tier of the proposed action. high: an authentication older than 900 s (auth_freshness_sec) is ESCALATED. critical: auth_method and an auth_freshness_sec of 300 s or less are required, or the action is ESCALATED. An amount over the grant\'s cap for its category is DENIED (CATEGORY_CAP_EXCEEDED) at any tier.',
         },
         transaction: {
           type: 'object',
-          description: 'Optional action context: resource, amount, category, payee.',
+          description: 'Optional action context, recorded with the decision.',
+          properties: {
+            amount: { type: 'number', description: 'The amount, checked against the grant\'s scope.category_caps for its category.' },
+            category: { type: 'string', description: 'The spending category, e.g. refund: the key into scope.category_caps.' },
+            payee: { type: 'string', description: 'Who receives the money or the result.' },
+            resource: { type: 'string', description: 'What the action acts on, e.g. order:456.' },
+          },
         },
         principal: { type: 'string', description: 'Who is acting.' },
         auth_method: { type: 'string', description: 'How the principal authenticated, e.g. webauthn.' },
@@ -90,6 +106,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'arobi_classify_and_route',
+    title: 'Choose the cheapest capable route',
+    annotations: { title: 'Choose the cheapest capable route', ...APPENDS_LOCAL_CHAIN },
     description:
       'Classify a prompt and choose the cheapest route capable of the work from your candidate set, reporting whether any cost above the cheapest capable route is justified by required_capabilities or an explicit quality_exception policy. Set record=false to preview without appending to the local chain.',
     inputSchema: {
@@ -100,7 +118,17 @@ export const TOOL_DEFINITIONS = [
           type: 'array',
           description:
             'Candidate models with id/model, cost_per_1k_prompt_usd, cost_per_1k_completion_usd, capabilities, observed_success_rate, and observed_sample_size.',
-          items: { type: 'object' },
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Your name for the candidate (model or name are taken too).' },
+              cost_per_1k_prompt_usd: { type: 'number', description: 'USD per 1,000 prompt tokens (default 0).' },
+              cost_per_1k_completion_usd: { type: 'number', description: 'USD per 1,000 completion tokens (default 0).' },
+              capabilities: { type: 'array', items: { type: 'string' }, description: 'What the candidate can do, matched against required_capabilities.' },
+              observed_success_rate: { type: 'number', description: 'The success rate you observed, 0 to 1, used by quality_exception.' },
+              observed_sample_size: { type: 'number', description: 'How many runs observed_success_rate is from (default 0).' },
+            },
+          },
         },
         required_capabilities: {
           type: 'array',
@@ -112,9 +140,9 @@ export const TOOL_DEFINITIONS = [
           description:
             'Optional policy allowing a higher-cost route only when its observed success rate beats the cheapest capable route by min_success_uplift with at least min_sample_size samples on each side.',
           properties: {
-            min_success_uplift: { type: 'number' },
-            min_sample_size: { type: 'integer' },
-            max_premium_usd: { type: 'number' },
+            min_success_uplift: { type: 'number', description: 'How much higher the dearer route\'s observed success rate must be, e.g. 0.05.' },
+            min_sample_size: { type: 'integer', description: 'The fewest observed runs each of the two routes needs before the uplift counts.' },
+            max_premium_usd: { type: 'number', description: 'Optional. The most extra USD the exception may spend over the cheapest capable route.' },
           },
           required: ['min_success_uplift', 'min_sample_size'],
         },
@@ -128,6 +156,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'arobi_verify_chain',
+    title: 'Verify a sealed record chain',
+    annotations: { title: 'Verify a sealed record chain', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
       'Recompute a set of sealed records locally and report whether they form one unbroken SHA-256 hash chain signed by one Ed25519 key, pinpointing the first broken record index and the reason. Pass expected_signer_kid to check who signed it: without it, a chain re-sealed with another key also passes. Unsigned records fail unless allow_unsigned is true.',
     inputSchema: {
