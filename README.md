@@ -1,5 +1,10 @@
 # Immaculate MCP — Pre-Action AI Governance & Evidence Server
 
+[![Arobi Immaculate MCP connector](https://glama.ai/mcp/connectors/io.github.Arobi-Technology-Alliance-Lab/immaculate/badges/score.svg)](https://glama.ai/mcp/connectors/io.github.Arobi-Technology-Alliance-Lab/immaculate)
+
+**Official MCP Registry ID:** `io.github.Arobi-Technology-Alliance-Lab/immaculate` · **Glama Connector:** [glama.ai/mcp/connectors/io.github.Arobi-Technology-Alliance-Lab/immaculate](https://glama.ai/mcp/connectors/io.github.Arobi-Technology-Alliance-Lab/immaculate)
+
+
 [![Arobi Technology Alliance, Inc.](https://aura-genesis.org/brand/arobi-technology-alliance.jpeg)](https://aura-genesis.org/immaculate/mcp/)
 
 **Immaculate MCP** is a hosted [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server built by **[Arobi Technology Alliance, Inc.](https://aura-genesis.org/)** (`Streamable HTTP`). AI agents call Immaculate before consequential actions to receive a reasoned **GRANTED**, **DENIED**, or **ESCALATED** verdict, route work to the right model tier, and record verifiable evidence trails.
