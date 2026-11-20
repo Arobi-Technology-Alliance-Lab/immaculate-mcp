@@ -53,7 +53,7 @@ Alternatively, pass `Authorization: Bearer <your-arobi-tenant-key>`.
 
 ## Local Stdio / Docker Bridge (for Stdio-Only MCP Clients)
 
-This repository also includes a zero-dependency MIT-licensed Node.js stdio-to-Streamable-HTTP bridge (`src/index.mjs`) and `Dockerfile` for MCP clients that require a local stdio process:
+This repository also includes a zero-dependency Node.js stdio-to-Streamable-HTTP bridge (`src/index.mjs`) and `Dockerfile` for MCP clients that require a local stdio process:
 
 ```bash
 # Run locally with Node.js >= 18
@@ -72,4 +72,4 @@ docker run -i --rm -e AROBI_TENANT_KEY=<your-arobi-tenant-key> arobi-immaculate-
 
 Arobi provides technical verification, policy enforcement, and tamper-evident evidence tooling. Arobi is not an insurer or a certification body; licensed insurers, regulators, and independent reviewers retain their own decisions.
 
-The client bridge, container configuration, manifest, and documentation in this repository are licensed under the **MIT License** (see [LICENSE](./LICENSE)). Arobi's hosted backend service at `https://aura-genesis.org/api/v1/mcp` remains proprietary to **Arobi Technology Alliance, Inc.**
+Everything in this repository (the client bridge, container configuration, manifest, and documentation) is proprietary to **Arobi Technology Alliance, Inc.** under the Arobi Proprietary License (see [LICENSE](./LICENSE)), as is the hosted service at `https://aura-genesis.org/api/v1/mcp`. Using the bridge and the hosted service is governed by the Arobi Terms of Service.

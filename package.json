@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Zero-dependency MCP stdio-to-Streamable-HTTP bridge for Arobi Immaculate MCP (pre-action AI governance verdicts, model routing, and evidence chain verification).",
   "type": "module",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "main": "src/index.mjs",
   "bin": {
     "arobi-immaculate-mcp": "./src/index.mjs"

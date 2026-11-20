@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Arobi Immaculate MCP — MIT-licensed stdio-to-Streamable-HTTP transport bridge.
+ * Arobi Immaculate MCP — stdio-to-Streamable-HTTP transport bridge.
+ * Copyright (c) 2026 Arobi Technology Alliance, Inc. All Rights Reserved. Arobi Proprietary License (see LICENSE).
  *
  * Bridges local stdio MCP clients (and container-based MCP inspectors) to the
  * hosted Arobi Immaculate Streamable HTTP endpoint (https://aura-genesis.org/api/v1/mcp).
