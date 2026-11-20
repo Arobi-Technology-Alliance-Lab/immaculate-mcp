@@ -51,6 +51,25 @@ Alternatively, pass `Authorization: Bearer <your-arobi-tenant-key>`.
 
 ---
 
-## Verification & Scope Boundary
+## Local Stdio / Docker Bridge (for Stdio-Only MCP Clients)
 
-Arobi provides technical verification, policy enforcement, and tamper-evident evidence tooling. Arobi is not an insurer or a certification body; licensed insurers, regulators, and independent reviewers retain their own decisions. All server implementation source code is proprietary to **Arobi Technology Alliance, Inc.**; this repository hosts the public MCP discovery manifest and client integration documentation.
+This repository also includes a zero-dependency MIT-licensed Node.js stdio-to-Streamable-HTTP bridge (`src/index.mjs`) and `Dockerfile` for MCP clients that require a local stdio process:
+
+```bash
+# Run locally with Node.js >= 18
+AROBI_TENANT_KEY=<your-arobi-tenant-key> node src/index.mjs
+
+# Or run via Docker
+docker build -t arobi-immaculate-mcp .
+docker run -i --rm -e AROBI_TENANT_KEY=<your-arobi-tenant-key> arobi-immaculate-mcp
+```
+
+`initialize`, `ping`, and `tools/list` introspection work without a key; metered `tools/call` requests require `AROBI_TENANT_KEY`.
+
+---
+
+## Verification, Scope Boundary & License
+
+Arobi provides technical verification, policy enforcement, and tamper-evident evidence tooling. Arobi is not an insurer or a certification body; licensed insurers, regulators, and independent reviewers retain their own decisions.
+
+The client bridge, container configuration, manifest, and documentation in this repository are licensed under the **MIT License** (see [LICENSE](./LICENSE)). Arobi's hosted backend service at `https://aura-genesis.org/api/v1/mcp` remains proprietary to **Arobi Technology Alliance, Inc.**

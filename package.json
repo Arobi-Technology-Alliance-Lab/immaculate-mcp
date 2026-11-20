@@ -1,0 +1,31 @@
+{
+  "name": "@arobi/immaculate-mcp",
+  "version": "1.0.0",
+  "description": "Zero-dependency MCP stdio-to-Streamable-HTTP bridge for Arobi Immaculate MCP (pre-action AI governance verdicts, model routing, and evidence chain verification).",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/index.mjs",
+  "bin": {
+    "arobi-immaculate-mcp": "./src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arobi-Technology-Alliance-Lab/immaculate-mcp.git"
+  },
+  "homepage": "https://aura-genesis.org/immaculate/mcp/",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-governance",
+    "ai-safety",
+    "evidence",
+    "arobi",
+    "immaculate"
+  ]
+}
