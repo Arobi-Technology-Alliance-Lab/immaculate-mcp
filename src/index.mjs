@@ -20,6 +20,8 @@ const SERVER_INFO = {
   version: '1.0.0',
 };
 
+const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
+
 const SERVER_INSTRUCTIONS =
   'Arobi Immaculate MCP server. Seal authority with arobi_route_grant, evaluate actions with arobi_authorize, choose policy-justified models with arobi_classify_and_route, and verify hash-chained records with arobi_verify_chain.';
 
@@ -61,13 +63,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'arobi_authorize',
     description:
-      'Decide whether an agent action is permitted against a sealed route grant, and seal a hash-chained AUTHORIZATION record. Returns GRANTED, DENIED, or ESCALATED with checks and reason code.',
+      'Decide whether an agent action is permitted against a route grant this server sealed, and seal a hash-chained AUTHORIZATION record. Returns GRANTED, DENIED, or ESCALATED with checks and reason code. A grant that is unsigned, or signed by any other key, is DENIED; the signing key is made when the server starts, so a grant is good for the run that sealed it.',
     inputSchema: {
       type: 'object',
       properties: {
         route_grant: {
           type: 'object',
-          description: 'The route_grant object returned by arobi_route_grant.',
+          description: 'The route_grant object returned by arobi_route_grant in this server run.',
         },
         action: { type: 'string', description: 'Action name, e.g. issue.refund' },
         consequence_tier: {
@@ -127,7 +129,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'arobi_verify_chain',
     description:
-      'Recompute a set of sealed records locally and report whether the SHA-256 hash chain and Ed25519 signatures are intact, pinpointing the first broken record index and reason if tampered.',
+      'Recompute a set of sealed records locally and report whether they form one unbroken SHA-256 hash chain signed by one Ed25519 key, pinpointing the first broken record index and the reason. Pass expected_signer_kid to check who signed it: without it, a chain re-sealed with another key also passes. Unsigned records fail unless allow_unsigned is true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -136,6 +138,14 @@ export const TOOL_DEFINITIONS = [
           description:
             'Ordered array of sealed records returned by arobi_route_grant, arobi_authorize, or arobi_classify_and_route.',
           items: { type: 'object' },
+        },
+        expected_signer_kid: {
+          type: 'string',
+          description: 'The signer_kid the records must be signed by (shown on every record this server seals).',
+        },
+        allow_unsigned: {
+          type: 'boolean',
+          description: 'Accept records without a signature and check their hash chain alone. Default false.',
         },
       },
       required: ['records'],
@@ -177,11 +187,11 @@ export function handleJsonRpc(msg) {
 
   switch (msg.method) {
     case 'initialize': {
+      // The client's version when this server speaks it, else the newest this server speaks.
       const requestedVersion = msg.params?.protocolVersion;
-      const protocolVersion =
-        typeof requestedVersion === 'string' && requestedVersion.length > 0
-          ? requestedVersion
-          : '2025-03-26';
+      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
+        ? requestedVersion
+        : SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
       return {
         jsonrpc: '2.0',
         id: msg.id,

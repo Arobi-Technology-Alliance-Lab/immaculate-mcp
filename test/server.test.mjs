@@ -2,9 +2,15 @@
  * Copyright (c) 2026 Arobi Technology Alliance, Inc. All Rights Reserved.
  */
 
+import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleJsonRpc } from '../src/index.mjs';
+import { LocalImmaculateEngine } from '../src/engine.mjs';
+
+function call(id, name, args) {
+  return handleJsonRpc({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }).result;
+}
 
 test('MCP initialize, ping, and tools/list return all 4 tools', () => {
   const init = handleJsonRpc({
@@ -179,4 +185,79 @@ test('arobi_classify_and_route picks cheapest capable or justified quality excep
   });
   assert.equal(upgraded.result.structuredContent.selected.id, 'frontier-pro');
   assert.equal(upgraded.result.structuredContent.justification_type, 'quality_exception');
+});
+
+test('initialize answers with a protocol version this server speaks', () => {
+  const version = (v) =>
+    handleJsonRpc({ jsonrpc: '2.0', id: 40, method: 'initialize', params: { protocolVersion: v, capabilities: {} } }).result
+      .protocolVersion;
+  assert.equal(version('2025-06-18'), '2025-06-18');
+  assert.equal(version('2099-01-01'), '2025-11-25');
+  assert.equal(version(undefined), '2025-11-25');
+});
+
+test('arobi_authorize refuses a grant this server did not seal', () => {
+  const grantArgs = { route_id: 'r1', scope: { actions: ['issue.refund'] }, granted_by: 'owner', delegated_to: 'agent' };
+  const ask = { action: 'issue.refund', consequence_tier: 'low', principal: 'agent' };
+
+  // Written by hand, with no signature.
+  const unsigned = call(20, 'arobi_authorize', { ...ask, route_grant: { route_id: 'r1', scope: { actions: ['*'] } } });
+  assert.equal(unsigned.structuredContent.decision, 'DENIED');
+  assert.equal(unsigned.structuredContent.reason_code, 'GRANT_UNSIGNED');
+
+  // Sealed with another key, which anyone can make.
+  const other = new LocalImmaculateEngine().routeGrant(grantArgs).route_grant;
+  const foreign = call(21, 'arobi_authorize', { ...ask, route_grant: other });
+  assert.equal(foreign.structuredContent.decision, 'DENIED');
+  assert.equal(foreign.structuredContent.reason_code, 'GRANT_FOREIGN_SIGNER');
+
+  // This server's own grant is honoured; the same grant with its scope widened afterwards is not.
+  const own = call(22, 'arobi_route_grant', grantArgs).structuredContent.route_grant;
+  assert.equal(call(23, 'arobi_authorize', { ...ask, route_grant: own }).structuredContent.decision, 'GRANTED');
+  const widened = call(24, 'arobi_authorize', { ...ask, action: 'wire.transfer', route_grant: { ...own, scope: { actions: ['*'] } } });
+  assert.equal(widened.structuredContent.decision, 'DENIED');
+  assert.equal(widened.structuredContent.reason_code, 'GRANT_SIGNATURE_INVALID');
+});
+
+test('arobi_verify_chain names the signer and refuses unsigned records, mixed signers and an unexpected signer', () => {
+  const sealChain = (engine) => {
+    const g = engine.routeGrant({ route_id: 'r2', scope: { actions: ['a'] }, granted_by: 'owner', delegated_to: 'agent' });
+    const a = engine.authorize({ route_grant: g.route_grant, action: 'a', consequence_tier: 'low', principal: 'agent' });
+    return [g.record, a.record];
+  };
+  const engine = new LocalImmaculateEngine();
+  const chain = sealChain(engine);
+
+  const ok = engine.verifyChain({ records: chain });
+  assert.equal(ok.valid, true);
+  assert.equal(ok.signer_kid, engine.signerKid);
+  assert.equal(ok.signer_pinned, false);
+  assert.equal(engine.verifyChain({ records: chain, expected_signer_kid: engine.signerKid }).signer_pinned, true);
+
+  // A chain sealed with another key is intact as signed, so it passes alone, and fails against the expected signer.
+  const forger = new LocalImmaculateEngine();
+  const forged = sealChain(forger);
+  assert.equal(engine.verifyChain({ records: forged }).valid, true);
+  const pinned = engine.verifyChain({ records: forged, expected_signer_kid: engine.signerKid });
+  assert.equal(pinned.valid, false);
+  assert.equal(pinned.first_broken_index, 0);
+
+  // One record re-signed with another key.
+  const resigned = {
+    ...chain[1],
+    public_key_pem: forger.publicKeyPem,
+    signer_kid: forger.signerKid,
+    signature_b64: crypto.sign(null, Buffer.from(chain[1].record_hash, 'utf8'), forger.privateKey).toString('base64'),
+  };
+  const mixed = engine.verifyChain({ records: [chain[0], resigned] });
+  assert.equal(mixed.valid, false);
+  assert.equal(mixed.first_broken_index, 1);
+
+  // Signatures stripped: refused, unless the hash chain alone is asked for.
+  const stripped = chain.map(({ signature_b64, public_key_pem, signer_kid, ...rest }) => rest);
+  assert.equal(engine.verifyChain({ records: stripped }).valid, false);
+  const hashOnly = engine.verifyChain({ records: stripped, allow_unsigned: true });
+  assert.equal(hashOnly.valid, true);
+  assert.equal(hashOnly.unsigned_count, 2);
+  assert.equal(hashOnly.signer_kid, null);
 });

@@ -40,15 +40,46 @@ function matchesActionPattern(allowedActions, requestedAction) {
   return false;
 }
 
+// signerKidOf names an Ed25519 public key (PEM) the way the engine names its own: the first 16 hex digits of the
+// SHA-256 of its SPKI encoding. It returns null for anything that is not a public key.
+export function signerKidOf(publicKeyPem) {
+  try {
+    const der = crypto.createPublicKey(publicKeyPem).export({ type: 'spki', format: 'der' });
+    return crypto.createHash('sha256').update(der).digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
 export class LocalImmaculateEngine {
+  // The signing key is generated when the engine starts: grants and records are signed by this run's key, and a
+  // grant is good only for the run of the server that sealed it.
   constructor() {
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
     this.privateKey = privateKey;
+    this.publicKey = publicKey;
     this.publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
-    const der = publicKey.export({ type: 'spki', format: 'der' });
-    this.signerKid = crypto.createHash('sha256').update(der).digest('hex').slice(0, 16);
+    this.signerKid = signerKidOf(this.publicKeyPem);
     this.chain = [];
     this.seenPrompts = new Map();
+  }
+
+  // grantStatus says whether route_grant was sealed by this engine: 'ok', 'unsigned', 'foreign' (signed with
+  // another key, which anyone can make) or 'invalid' (its hash or signature does not verify).
+  grantStatus(routeGrant) {
+    const { grant_hash, signer_kid, public_key_pem, signature_b64, ...core } = routeGrant;
+    if (typeof grant_hash !== 'string' || typeof signature_b64 !== 'string') return 'unsigned';
+    if (signer_kid !== this.signerKid || (public_key_pem !== undefined && signerKidOf(public_key_pem) !== this.signerKid)) {
+      return 'foreign';
+    }
+    if (sha256Hex(canonicalJson(core)) !== grant_hash) return 'invalid';
+    try {
+      return crypto.verify(null, Buffer.from(grant_hash, 'utf8'), this.publicKey, Buffer.from(signature_b64, 'base64'))
+        ? 'ok'
+        : 'invalid';
+    } catch {
+      return 'invalid';
+    }
   }
 
   sealRecord(recordType, payload) {
@@ -176,25 +207,19 @@ export class LocalImmaculateEngine {
     let reasonCode = 'WITHIN_ROUTE_GRANT_SCOPE';
     let reason = `Action "${action}" is authorized within route grant scope for principal "${principal}".`;
 
-    if (route_grant.grant_hash && route_grant.signature_b64 && route_grant.public_key_pem) {
-      const { grant_hash, signer_kid, public_key_pem, signature_b64, ...core } = route_grant;
-      const expectedHash = sha256Hex(canonicalJson(core));
-      let sigOk = false;
-      try {
-        sigOk =
-          expectedHash === grant_hash &&
-          crypto.verify(
-            null,
-            Buffer.from(grant_hash, 'utf8'),
-            public_key_pem,
-            Buffer.from(signature_b64, 'base64')
-          );
-      } catch {
-        sigOk = false;
-      }
-      checks.push({ check: 'grant_signature', passed: sigOk });
-      if (!sigOk) {
-        decision = 'DENIED';
+    // Only a grant this server sealed counts. An unsigned grant, or one signed with any other key, is refused:
+    // otherwise a caller could write its own grant and be authorized by it.
+    const grantStatus = this.grantStatus(route_grant);
+    checks.push({ check: 'grant_signature', passed: grantStatus === 'ok' });
+    if (grantStatus !== 'ok') {
+      decision = 'DENIED';
+      if (grantStatus === 'unsigned') {
+        reasonCode = 'GRANT_UNSIGNED';
+        reason = 'Route grant is not signed. Call arobi_route_grant to seal one.';
+      } else if (grantStatus === 'foreign') {
+        reasonCode = 'GRANT_FOREIGN_SIGNER';
+        reason = `Route grant was not sealed by this server (signer ${this.signerKid}). A grant is good only for the run of the server that sealed it.`;
+      } else {
         reasonCode = 'GRANT_SIGNATURE_INVALID';
         reason = 'Route grant hash or Ed25519 signature verification failed.';
       }
@@ -412,11 +437,20 @@ export class LocalImmaculateEngine {
     };
   }
 
+  // verifyChain checks that records are one unbroken hash chain, every record signed by one Ed25519 key. Without
+  // expected_signer_kid that shows the chain is intact as signed, not who signed it: a chain re-sealed with another
+  // key passes too. With it, the signer must be that key. An unsigned record fails unless allow_unsigned is true.
   verifyChain(args) {
     if (!args || typeof args !== 'object' || !Array.isArray(args.records)) {
       throw new Error('records (array) is required.');
     }
-    const { records } = args;
+    const { records, expected_signer_kid, allow_unsigned = false } = args;
+    if (expected_signer_kid !== undefined && (typeof expected_signer_kid !== 'string' || !expected_signer_kid)) {
+      throw new Error('expected_signer_kid must be a non-empty string.');
+    }
+    const broken = (i, reason) => ({ valid: false, checked_count: i, first_broken_index: i, reason, mode: 'local' });
+    let chainSigner = null;
+    let unsigned = 0;
     if (records.length === 0) {
       return {
         valid: true,
@@ -468,36 +502,58 @@ export class LocalImmaculateEngine {
         };
       }
 
-      if (rec.signature_b64 && rec.public_key_pem) {
-        let sigValid = false;
-        try {
-          sigValid = crypto.verify(
-            null,
-            Buffer.from(rec.record_hash, 'utf8'),
-            rec.public_key_pem,
-            Buffer.from(rec.signature_b64, 'base64')
-          );
-        } catch {
-          sigValid = false;
+      if (!rec.signature_b64 || !rec.public_key_pem) {
+        if (!allow_unsigned) {
+          return broken(i, `Record at index ${i} is not signed (pass allow_unsigned: true to check the hash chain alone).`);
         }
-        if (!sigValid) {
-          return {
-            valid: false,
-            checked_count: i,
-            first_broken_index: i,
-            reason: `Ed25519 signature verification failed at index ${i}.`,
-            mode: 'local',
-          };
-        }
+        unsigned++;
+        continue;
+      }
+      const kid = signerKidOf(rec.public_key_pem);
+      if (kid === null || (rec.signer_kid !== undefined && rec.signer_kid !== kid)) {
+        return broken(i, `Record at index ${i} names signer ${rec.signer_kid}, which is not the key it carries.`);
+      }
+      if (chainSigner === null) chainSigner = kid;
+      if (kid !== chainSigner) {
+        return broken(i, `Record at index ${i} is signed by ${kid}, not by ${chainSigner} like the records before it.`);
+      }
+      if (expected_signer_kid !== undefined && kid !== expected_signer_kid) {
+        return broken(i, `Record at index ${i} is signed by ${kid}, not by the expected signer ${expected_signer_kid}.`);
+      }
+      let sigValid = false;
+      try {
+        sigValid = crypto.verify(
+          null,
+          Buffer.from(rec.record_hash, 'utf8'),
+          rec.public_key_pem,
+          Buffer.from(rec.signature_b64, 'base64')
+        );
+      } catch {
+        sigValid = false;
+      }
+      if (!sigValid) {
+        return broken(i, `Ed25519 signature verification failed at index ${i}.`);
       }
     }
 
+    const signed = records.length - unsigned;
+    let reason = `All ${records.length} record(s) form one unbroken SHA-256 hash chain`;
+    if (signed > 0) {
+      reason += expected_signer_kid !== undefined
+        ? `, and ${signed} signed by the expected signer ${chainSigner}.`
+        : `, and ${signed} signed by one key (signer ${chainSigner}). Pass expected_signer_kid to check that this is the signer you trust: a chain re-sealed with another key also passes without it.`;
+    } else {
+      reason += ', and none is signed.';
+    }
     return {
       valid: true,
       checked_count: records.length,
       first_broken_index: null,
       head_hash: records[records.length - 1].record_hash,
-      reason: `All ${records.length} record(s) passed canonical SHA-256 hash-chain and Ed25519 signature verification.`,
+      signer_kid: chainSigner,
+      signer_pinned: expected_signer_kid !== undefined && signed > 0,
+      unsigned_count: unsigned,
+      reason,
       mode: 'local',
     };
   }
