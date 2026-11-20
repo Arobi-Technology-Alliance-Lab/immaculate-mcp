@@ -1,159 +1,291 @@
 #!/usr/bin/env node
 /**
- * Arobi Immaculate MCP — stdio-to-Streamable-HTTP transport bridge.
- * Copyright (c) 2026 Arobi Technology Alliance, Inc. All Rights Reserved. Arobi Proprietary License (see LICENSE).
+ * Copyright (c) 2026 Arobi Technology Alliance, Inc. All Rights Reserved.
  *
- * Bridges local stdio MCP clients (and container-based MCP inspectors) to the
- * hosted Arobi Immaculate Streamable HTTP endpoint (https://aura-genesis.org/api/v1/mcp).
+ * Arobi Immaculate MCP Server — Self-Contained Local Stdio Implementation.
  *
- * Environment variables:
- *   AROBI_TENANT_KEY  Optional for initialize / tools/list introspection; required for metered tools/call.
- *   AROBI_MCP_URL     Override endpoint URL (defaults to https://aura-genesis.org/api/v1/mcp).
+ * Implements the Model Context Protocol (JSON-RPC 2.0 over stdio) locally with
+ * zero external runtime dependencies:
+ *   - arobi_route_grant        Seal a signed, bounded route grant locally
+ *   - arobi_authorize          Evaluate an action against a route grant & seal AUTHORIZATION record
+ *   - arobi_classify_and_route Pick the cheapest capable model or justify a quality exception
+ *   - arobi_verify_chain       Re-derive SHA-256 hash-chain continuity & Ed25519 signatures
  */
 
 import readline from 'node:readline';
+import { LocalImmaculateEngine } from './engine.mjs';
 
-const ENDPOINT = (process.env.AROBI_MCP_URL || 'https://aura-genesis.org/api/v1/mcp').trim();
-const TENANT_KEY = (process.env.AROBI_TENANT_KEY || '').trim();
-let sessionId = null;
+const SERVER_INFO = {
+  name: 'arobi-immaculate-mcp',
+  version: '1.0.0',
+};
+
+const SERVER_INSTRUCTIONS =
+  'Arobi Immaculate MCP server. Seal authority with arobi_route_grant, evaluate actions with arobi_authorize, choose policy-justified models with arobi_classify_and_route, and verify hash-chained records with arobi_verify_chain.';
+
+export const TOOL_DEFINITIONS = [
+  {
+    name: 'arobi_route_grant',
+    description:
+      'Seal WHO granted WHAT authority to WHICH workflow, with scope, category caps, attenuation, and expiry. Returns a locally Ed25519-signed route_grant and hash-chained ROUTE_GRANT record.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        route_id: { type: 'string', description: 'Unique identifier for this workflow route.' },
+        scope: {
+          type: 'object',
+          description: 'Allowed actions and optional per-category spending caps.',
+          properties: {
+            actions: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Allowed action names or wildcard patterns (e.g. ["issue.refund", "ticket.*"]).',
+            },
+            category_caps: {
+              type: 'object',
+              description: 'Optional numeric caps keyed by category name (e.g. { "refund": 250 }).',
+              additionalProperties: { type: 'number' },
+            },
+          },
+          required: ['actions'],
+        },
+        granted_by: { type: 'string', description: 'Principal issuing the authority grant.' },
+        delegated_to: { type: 'string', description: 'Agent or workflow receiving delegated authority.' },
+        attenuation: { type: 'string', description: 'Plain-language limits carried with the grant.' },
+        expires_at: { type: 'string', description: 'ISO 8601 expiry timestamp (defaults to +24h).' },
+        revocable: { type: 'boolean', description: 'Whether the grant can be revoked (default true).' },
+      },
+      required: ['route_id', 'scope', 'granted_by', 'delegated_to'],
+    },
+  },
+  {
+    name: 'arobi_authorize',
+    description:
+      'Decide whether an agent action is permitted against a sealed route grant, and seal a hash-chained AUTHORIZATION record. Returns GRANTED, DENIED, or ESCALATED with checks and reason code.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        route_grant: {
+          type: 'object',
+          description: 'The route_grant object returned by arobi_route_grant.',
+        },
+        action: { type: 'string', description: 'Action name, e.g. issue.refund' },
+        consequence_tier: {
+          type: 'string',
+          enum: ['low', 'medium', 'high', 'critical'],
+          description: 'Impact tier of the proposed action.',
+        },
+        transaction: {
+          type: 'object',
+          description: 'Optional action context: resource, amount, category, payee.',
+        },
+        principal: { type: 'string', description: 'Who is acting.' },
+        auth_method: { type: 'string', description: 'How the principal authenticated, e.g. webauthn.' },
+        auth_freshness_sec: { type: 'number', description: 'Age in seconds of that authentication.' },
+      },
+      required: ['route_grant', 'action', 'consequence_tier', 'principal'],
+    },
+  },
+  {
+    name: 'arobi_classify_and_route',
+    description:
+      'Classify a prompt and choose the cheapest route capable of the work from your candidate set, reporting whether any cost above the cheapest capable route is justified by required_capabilities or an explicit quality_exception policy. Set record=false to preview without appending to the local chain.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Prompt text to classify and route.' },
+        candidates: {
+          type: 'array',
+          description:
+            'Candidate models with id/model, cost_per_1k_prompt_usd, cost_per_1k_completion_usd, capabilities, observed_success_rate, and observed_sample_size.',
+          items: { type: 'object' },
+        },
+        required_capabilities: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Capabilities a candidate must advertise to be considered capable.',
+        },
+        quality_exception: {
+          type: 'object',
+          description:
+            'Optional policy allowing a higher-cost route only when its observed success rate beats the cheapest capable route by min_success_uplift with at least min_sample_size samples on each side.',
+          properties: {
+            min_success_uplift: { type: 'number' },
+            min_sample_size: { type: 'integer' },
+            max_premium_usd: { type: 'number' },
+          },
+          required: ['min_success_uplift', 'min_sample_size'],
+        },
+        record: {
+          type: 'boolean',
+          description: 'Default true. Set false to evaluate without sealing a chain record.',
+        },
+      },
+      required: ['prompt', 'candidates'],
+    },
+  },
+  {
+    name: 'arobi_verify_chain',
+    description:
+      'Recompute a set of sealed records locally and report whether the SHA-256 hash chain and Ed25519 signatures are intact, pinpointing the first broken record index and reason if tampered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        records: {
+          type: 'array',
+          description:
+            'Ordered array of sealed records returned by arobi_route_grant, arobi_authorize, or arobi_classify_and_route.',
+          items: { type: 'object' },
+        },
+      },
+      required: ['records'],
+    },
+  },
+];
+
+const engine = new LocalImmaculateEngine();
 
 function writeMessage(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-function parseSseJson(text) {
-  const events = [];
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith('data:')) {
-      const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      try {
-        events.push(JSON.parse(payload));
-      } catch {
-        // Ignore non-JSON SSE keepalive lines
-      }
-    }
-  }
-  return events;
-}
-
-async function forwardRequest(msg) {
-  const headers = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json, text/event-stream',
-    'User-Agent': 'arobi-immaculate-mcp-bridge/1.0.0',
-  };
-  if (TENANT_KEY) {
-    headers['X-Arobi-Tenant-Key'] = TENANT_KEY;
-  }
-  if (sessionId) {
-    headers['Mcp-Session-Id'] = sessionId;
-  }
-
-  const res = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(msg),
-  });
-
-  const nextSession = res.headers.get('mcp-session-id');
-  if (nextSession) sessionId = nextSession;
-
-  if (msg.id === undefined) {
-    // JSON-RPC notification: no response expected
-    return;
-  }
-
-  const contentType = (res.headers.get('content-type') || '').toLowerCase();
-  const raw = await res.text();
-
-  if (!res.ok) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.jsonrpc === '2.0') {
-        writeMessage({ ...parsed, id: msg.id });
-        return;
-      }
-    } catch {
-      // Fall through to generic JSON-RPC error
-    }
-    writeMessage({
-      jsonrpc: '2.0',
-      id: msg.id,
-      error: {
-        code: res.status === 401 || res.status === 403 ? -32001 : -32000,
-        message: `Upstream Immaculate MCP returned HTTP ${res.status}: ${raw.slice(0, 300)}`,
-      },
-    });
-    return;
-  }
-
-  if (contentType.includes('text/event-stream')) {
-    const events = parseSseJson(raw);
-    for (const ev of events) writeMessage(ev);
-    return;
-  }
-
-  if (raw.trim()) {
-    const parsed = JSON.parse(raw);
-    writeMessage(parsed);
+function handleToolCall(name, args) {
+  switch (name) {
+    case 'arobi_route_grant':
+      return engine.routeGrant(args);
+    case 'arobi_authorize':
+      return engine.authorize(args);
+    case 'arobi_classify_and_route':
+      return engine.classifyAndRoute(args);
+    case 'arobi_verify_chain':
+      return engine.verifyChain(args);
+    default:
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 
-async function handleLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-
-  let msg;
-  try {
-    msg = JSON.parse(trimmed);
-  } catch {
-    writeMessage({
+export function handleJsonRpc(msg) {
+  if (!msg || typeof msg !== 'object') {
+    return {
       jsonrpc: '2.0',
       id: null,
-      error: { code: -32700, message: 'Parse error: invalid JSON' },
-    });
-    return;
+      error: { code: -32600, message: 'Invalid Request' },
+    };
   }
 
-  // Handle MCP ping locally for fast liveness checks
-  if (msg.method === 'ping' && msg.id !== undefined) {
-    writeMessage({ jsonrpc: '2.0', id: msg.id, result: {} });
-    return;
-  }
+  const isNotification = msg.id === undefined;
 
-  // Skip forwarding notifications that have no upstream side effects
-  if (msg.method === 'notifications/initialized' && msg.id === undefined) {
-    return;
-  }
-
-  try {
-    await forwardRequest(msg);
-  } catch (err) {
-    if (msg.id !== undefined) {
-      writeMessage({
+  switch (msg.method) {
+    case 'initialize': {
+      const requestedVersion = msg.params?.protocolVersion;
+      const protocolVersion =
+        typeof requestedVersion === 'string' && requestedVersion.length > 0
+          ? requestedVersion
+          : '2025-03-26';
+      return {
         jsonrpc: '2.0',
         id: msg.id,
-        error: {
-          code: -32603,
-          message: `Bridge transport error: ${err instanceof Error ? err.message : String(err)}`,
+        result: {
+          protocolVersion,
+          capabilities: {
+            tools: { listChanged: false },
+          },
+          serverInfo: SERVER_INFO,
+          instructions: SERVER_INSTRUCTIONS,
         },
-      });
+      };
     }
+
+    case 'notifications/initialized':
+    case 'notifications/cancelled':
+      return null;
+
+    case 'ping':
+      return isNotification ? null : { jsonrpc: '2.0', id: msg.id, result: {} };
+
+    case 'tools/list':
+      return {
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { tools: TOOL_DEFINITIONS },
+      };
+
+    case 'resources/list':
+      return {
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { resources: [] },
+      };
+
+    case 'prompts/list':
+      return {
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { prompts: [] },
+      };
+
+    case 'tools/call': {
+      const toolName = msg.params?.name;
+      const toolArgs = msg.params?.arguments ?? {};
+      try {
+        const result = handleToolCall(toolName, toolArgs);
+        return {
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+            isError: false,
+          },
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
+            isError: true,
+          },
+        };
+      }
+    }
+
+    default:
+      if (isNotification) return null;
+      return {
+        jsonrpc: '2.0',
+        id: msg.id,
+        error: { code: -32601, message: `Method not found: ${msg.method}` },
+      };
   }
 }
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  crlfDelay: Infinity,
-});
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
 
-// Serialize message handling to preserve JSON-RPC ordering
-let queue = Promise.resolve();
-rl.on('line', (line) => {
-  queue = queue.then(() => handleLine(line));
-});
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let msg;
+    try {
+      msg = JSON.parse(trimmed);
+    } catch {
+      writeMessage({
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32700, message: 'Parse error: invalid JSON' },
+      });
+      return;
+    }
+    const resp = handleJsonRpc(msg);
+    if (resp) writeMessage(resp);
+  });
 
-rl.on('close', () => {
-  queue.finally(() => process.exit(0));
-});
+  rl.on('close', () => {
+    process.exit(0);
+  });
+}

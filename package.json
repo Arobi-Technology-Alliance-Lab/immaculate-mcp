@@ -1,7 +1,7 @@
 {
   "name": "@arobi/immaculate-mcp",
   "version": "1.0.0",
-  "description": "Zero-dependency MCP stdio-to-Streamable-HTTP bridge for Arobi Immaculate MCP (pre-action AI governance verdicts, model routing, and evidence chain verification).",
+  "description": "Self-contained MCP server for pre-action AI governance verdicts, policy-aware model routing, and cryptographic Ed25519/SHA-256 evidence chain verification.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "src/index.mjs",
@@ -9,7 +9,8 @@
     "arobi-immaculate-mcp": "./src/index.mjs"
   },
   "scripts": {
-    "start": "node src/index.mjs"
+    "start": "node src/index.mjs",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -25,6 +26,7 @@
     "ai-governance",
     "ai-safety",
     "evidence",
+    "ed25519",
     "arobi",
     "immaculate"
   ]
