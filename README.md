@@ -31,6 +31,10 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 - **Two implementations.** The local engine is a separate, smaller implementation for offline development, testing and evaluation, and its rules are the ones above (see `src/engine.mjs`). The hosted service applies its own policy and records each decision to your workspace's ledger, so for the same input its verdict can differ from the local engine's.
 - **Keys.** The local engine makes a new Ed25519 signing key each time it starts. Its grants are honoured only by the run that sealed them, and every record names its signer in `signer_kid`. A chain shows who signed it only when it is checked against a signer you trust (`expected_signer_kid`); without that, it shows that the chain is intact as signed.
 - **Not an independent check.** Whoever runs the local server holds its key and controls what it is told. For decisions that must be checked by someone other than the agent's operator, use the hosted service.
+- **Tools.** The hosted service has a fifth tool, `arobi_revoke_grant`, which withdraws a grant before it is used (since
+  2026-11-21, version 1.1.0). The local engine has the four tools above; a local grant ends when it expires or when the
+  run that sealed it stops. Neither one lists or searches sealed records yet: records come back with each decision, and
+  the hosted service keeps them in your workspace's ledger.
 
 ---
 
