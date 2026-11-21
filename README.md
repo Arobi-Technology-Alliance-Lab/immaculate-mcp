@@ -63,6 +63,30 @@ docker build -t arobi-immaculate-mcp .
 docker run -i --rm arobi-immaculate-mcp
 ```
 
+### Use with gnosh
+
+[gnosh](https://github.com/gnosh-ai/gnosh) reads MCP servers in Claude Code's shape, so Immaculate needs no adapter. Add the local engine for every project (gnosh's user scope), then check that gnosh connects to it:
+
+```bash
+gnosh mcp add -s user arobi-immaculate -- node /absolute/path/to/immaculate-mcp/src/index.mjs
+gnosh mcp list
+```
+
+`gnosh mcp list` should show the server as connected with four tools. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
+
+To use the hosted connector, pipe the entry in on standard input, so the key never appears on the command line:
+
+```bash
+echo '{"type": "http", "url": "https://aura-genesis.org/api/v1/mcp", "headers": {"X-Arobi-Tenant-Key": "${AROBI_TENANT_KEY}"}}' \
+  | gnosh mcp add-json -s user arobi-immaculate-cloud -
+```
+
+The single quotes keep `${AROBI_TENANT_KEY}` as written. gnosh fills it in from your environment when it connects, so the key itself stays out of the file too.
+
+In a gnosh session the tools are named `mcp__arobi-immaculate__arobi_authorize`, `mcp__arobi-immaculate__arobi_route_grant`, `mcp__arobi-immaculate__arobi_classify_and_route` and `mcp__arobi-immaculate__arobi_verify_chain`. gnosh's `/mcp` shows each server's state.
+
+Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux (Ubuntu 24.04): after the `add` above, `gnosh mcp list` showed `arobi-immaculate` as connected with its four tools, and the hosted connector connected the same way, with gnosh's `mcp.json` keeping the key as `${AROBI_TENANT_KEY}`. gnosh runs on Linux and macOS.
+
 ---
 
 ## Optional Managed Cloud Endpoint (Streamable HTTP)
