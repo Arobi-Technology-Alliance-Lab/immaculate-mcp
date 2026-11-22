@@ -8,7 +8,7 @@
 
 **Arobi Immaculate MCP** is a self-contained, zero-dependency [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`stdio` / Docker) built by **[Arobi Technology Alliance, Inc.](https://aura-genesis.org/)**.
 
-It executes **100% locally and offline** using Node.js built-in `node:crypto` (Ed25519 signatures + canonical SHA-256 hash chains) so MCP clients can issue bounded route grants, evaluate pre-action authority checks (**GRANTED**, **DENIED**, or **ESCALATED**), select policy-justified models, and check that a chain of sealed records is intact and who signed it, without an API key or external network calls.
+It executes **100% locally and offline** using Node.js built-in `node:crypto` (Ed25519 signatures + canonical SHA-256 hash chains) so MCP clients can issue bounded route grants, revoke them before they expire, evaluate pre-action authority checks (**GRANTED**, **DENIED**, or **ESCALATED**), select policy-justified models, and check that a chain of sealed records is intact and who signed it, without an API key or external network calls.
 
 - **Local Implementation:** `src/engine.mjs` + `src/index.mjs` (Node.js ≥ 18, zero external runtime dependencies, includes `Dockerfile` and `npm test`)
 - **Hosted Cloud Option (`Streamable HTTP`):** `https://aura-genesis.org/api/v1/mcp` ([Documentation & 110 Free Credits](https://aura-genesis.org/immaculate/mcp/))
@@ -22,7 +22,8 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 | Tool | Purpose |
 | :--- | :--- |
 | `arobi_route_grant` | Seals WHO granted WHAT authority to WHICH workflow (`scope.actions`, `scope.category_caps`, `attenuation`, `expires_at`) with an Ed25519 signature and hash-chained `ROUTE_GRANT` record. |
-| `arobi_authorize` | Verifies that the grant was sealed by this server (an unsigned grant, or one signed with any other key, is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
+| `arobi_revoke_grant` | Ends a grant this server sealed before it expires: seals a hash-chained `ROUTE_REVOKE` record, after which `arobi_authorize` **DENIES** the grant (`GRANT_REVOKED`). A grant that is unsigned, signed by another key, sealed with `revocable: false`, expired or already revoked is **REFUSED** with a reason code, and nothing is sealed. |
+| `arobi_authorize` | Verifies that the grant was sealed by this server and not revoked (an unsigned grant, one signed with any other key, or a revoked one is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
 | `arobi_classify_and_route` | Classifies prompt complexity, filters capable candidates, picks the lowest-cost capable model or applies an explicit `quality_exception` uplift rule, detects repeated work, and optionally seals a `ROUTING_DECISION` record. |
 | `arobi_verify_chain` | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
 
@@ -31,10 +32,11 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 - **Two implementations.** The local engine is a separate, smaller implementation for offline development, testing and evaluation, and its rules are the ones above (see `src/engine.mjs`). The hosted service applies its own policy and records each decision to your workspace's ledger, so for the same input its verdict can differ from the local engine's.
 - **Keys.** The local engine makes a new Ed25519 signing key each time it starts. Its grants are honoured only by the run that sealed them, and every record names its signer in `signer_kid`. A chain shows who signed it only when it is checked against a signer you trust (`expected_signer_kid`); without that, it shows that the chain is intact as signed.
 - **Not an independent check.** Whoever runs the local server holds its key and controls what it is told. For decisions that must be checked by someone other than the agent's operator, use the hosted service.
-- **Tools.** The hosted service has a fifth tool, `arobi_revoke_grant`, which withdraws a grant before it is used (since
-  2026-11-21, version 1.1.0). The local engine has the four tools above; a local grant ends when it expires or when the
-  run that sealed it stops. Neither one lists or searches sealed records yet: records come back with each decision, and
-  the hosted service keeps them in your workspace's ledger.
+- **Tools.** Both have the five tools above. The hosted service added `arobi_revoke_grant` in its version 1.1.0
+  (2026-11-21) and the local engine in 1.2.0. A local revocation, like the local key, lasts for the run that made it:
+  a local grant ends when it is revoked, when it expires, or when the run that sealed it stops. Neither one lists or
+  searches sealed records yet: records come back with each decision, and the hosted service keeps them in your
+  workspace's ledger.
 
 ---
 
@@ -76,7 +78,7 @@ gnosh mcp add -s user arobi-immaculate -- node /absolute/path/to/immaculate-mcp/
 gnosh mcp list
 ```
 
-`gnosh mcp list` should show the server as connected with four tools. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
+`gnosh mcp list` should show the server as connected with five tools. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
 
 To use the hosted connector, pipe the entry in on standard input, so the key never appears on the command line:
 
@@ -87,9 +89,9 @@ echo '{"type": "http", "url": "https://aura-genesis.org/api/v1/mcp", "headers": 
 
 The single quotes keep `${AROBI_TENANT_KEY}` as written. gnosh fills it in from your environment when it connects, so the key itself stays out of the file too.
 
-In a gnosh session the tools are named `mcp__arobi-immaculate__arobi_authorize`, `mcp__arobi-immaculate__arobi_route_grant`, `mcp__arobi-immaculate__arobi_classify_and_route` and `mcp__arobi-immaculate__arobi_verify_chain`. gnosh's `/mcp` shows each server's state.
+In a gnosh session the tools are named `mcp__arobi-immaculate__arobi_authorize`, `mcp__arobi-immaculate__arobi_route_grant`, `mcp__arobi-immaculate__arobi_revoke_grant`, `mcp__arobi-immaculate__arobi_classify_and_route` and `mcp__arobi-immaculate__arobi_verify_chain`. gnosh's `/mcp` shows each server's state.
 
-Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux (Ubuntu 24.04): after the `add` above, `gnosh mcp list` showed `arobi-immaculate` as connected with its four tools, and the hosted connector connected the same way, with gnosh's `mcp.json` keeping the key as `${AROBI_TENANT_KEY}`. gnosh runs on Linux and macOS.
+Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux (Ubuntu 24.04): after the `add` above, `gnosh mcp list` showed `arobi-immaculate` as connected with its four tools (version 1.1.0; 1.2.0 adds `arobi_revoke_grant` as the fifth), and the hosted connector connected the same way, with gnosh's `mcp.json` keeping the key as `${AROBI_TENANT_KEY}`. gnosh runs on Linux and macOS.
 
 ---
 

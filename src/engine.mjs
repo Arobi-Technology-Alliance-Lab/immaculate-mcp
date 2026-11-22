@@ -62,6 +62,9 @@ export class LocalImmaculateEngine {
     this.signerKid = signerKidOf(this.publicKeyPem);
     this.chain = [];
     this.seenPrompts = new Map();
+    // Grants revoked in this run, by grant_hash. Like the key, they last for the run: a restarted server honours none
+    // of the old run's grants anyway.
+    this.revocations = new Map();
   }
 
   // grantStatus says whether route_grant was sealed by this engine: 'ok', 'unsigned', 'foreign' (signed with
@@ -179,6 +182,76 @@ export class LocalImmaculateEngine {
     };
   }
 
+  // revokeGrant ends a grant this server sealed before it expires. It seals a ROUTE_REVOKE record, chained after the
+  // records before it, and returns route_revoke. From then on arobi_authorize DENIES the grant (GRANT_REVOKED). Only a
+  // grant this server sealed, marked revocable, not expired and not already revoked can be revoked; anything else is
+  // REFUSED with a reason code and nothing is sealed.
+  revokeGrant(args) {
+    if (!args || typeof args !== 'object') {
+      throw new Error('Arguments object is required.');
+    }
+    const { route_grant, reason } = args;
+    if (!route_grant || typeof route_grant !== 'object') {
+      throw new Error('route_grant (object) is required: the route_grant arobi_route_grant returned.');
+    }
+    if (reason !== undefined && (typeof reason !== 'string' || reason.length > 2000)) {
+      throw new Error('reason must be a string of up to 2,000 characters.');
+    }
+    const refuse = (reasonCode, why, extra = {}) => ({ status: 'REFUSED', reason_code: reasonCode, reason: why, mode: 'local', ...extra });
+
+    const grantStatus = this.grantStatus(route_grant);
+    if (grantStatus === 'unsigned') {
+      return refuse('GRANT_UNSIGNED', 'Route grant is not signed, so this server never sealed it and there is nothing to revoke.');
+    }
+    if (grantStatus === 'foreign') {
+      return refuse('GRANT_FOREIGN_SIGNER', `Route grant was not sealed by this server (signer ${this.signerKid}). Only the server run that sealed a grant can revoke it.`);
+    }
+    if (grantStatus !== 'ok') {
+      return refuse('GRANT_SIGNATURE_INVALID', 'Route grant hash or Ed25519 signature verification failed.');
+    }
+    if (route_grant.revocable === false) {
+      return refuse('GRANT_NOT_REVOCABLE', 'This grant was sealed with revocable: false. It ends when it expires.');
+    }
+    const prior = this.revocations.get(route_grant.grant_hash);
+    if (prior) {
+      return refuse('GRANT_ALREADY_REVOKED', `This grant was already revoked at ${prior.revoked_at}.`, { route_revoke: prior });
+    }
+    const expMs = Date.parse(route_grant.expires_at);
+    if (!Number.isNaN(expMs) && expMs <= Date.now()) {
+      return refuse('GRANT_EXPIRED', `This grant already ended when it expired at ${route_grant.expires_at}; it authorizes nothing.`);
+    }
+
+    const revokeCore = {
+      revoke_id: `rv_${crypto.randomBytes(8).toString('hex')}`,
+      grant_id: route_grant.grant_id,
+      grant_hash: route_grant.grant_hash,
+      route_id: route_grant.route_id,
+      reason: typeof reason === 'string' ? reason : '',
+      revoked_at: new Date().toISOString(),
+    };
+    const revokeHash = sha256Hex(canonicalJson(revokeCore));
+    const revokeSignature = crypto
+      .sign(null, Buffer.from(revokeHash, 'utf8'), this.privateKey)
+      .toString('base64');
+    const routeRevoke = {
+      ...revokeCore,
+      revoke_hash: revokeHash,
+      signer_kid: this.signerKid,
+      public_key_pem: this.publicKeyPem,
+      signature_b64: revokeSignature,
+    };
+
+    const record = this.sealRecord('ROUTE_REVOKE', { ...revokeCore, revoke_hash: revokeHash });
+    this.revocations.set(route_grant.grant_hash, routeRevoke);
+
+    return {
+      status: 'REVOKED',
+      mode: 'local',
+      route_revoke: routeRevoke,
+      record,
+    };
+  }
+
   authorize(args) {
     if (!args || typeof args !== 'object') {
       throw new Error('Arguments object is required.');
@@ -191,10 +264,14 @@ export class LocalImmaculateEngine {
       principal,
       auth_method,
       auth_freshness_sec,
+      route_revoke,
     } = args;
 
     if (!route_grant || typeof route_grant !== 'object') {
       throw new Error('route_grant (object) is required. Call arobi_route_grant first.');
+    }
+    if (route_revoke !== undefined && (!route_revoke || typeof route_revoke !== 'object')) {
+      throw new Error('route_revoke must be the route_revoke object arobi_revoke_grant returned.');
     }
     if (!action || typeof action !== 'string') throw new Error('action (string) is required.');
     if (!['low', 'medium', 'high', 'critical'].includes(consequence_tier)) {
@@ -222,6 +299,27 @@ export class LocalImmaculateEngine {
       } else {
         reasonCode = 'GRANT_SIGNATURE_INVALID';
         reason = 'Route grant hash or Ed25519 signature verification failed.';
+      }
+    }
+
+    // A revoked grant authorizes nothing. This run knows its own revocations; a route_revoke passed in is honoured too,
+    // and one that names a different grant is refused rather than ignored. Honouring a revocation can only take
+    // authority away, so it fails closed.
+    let revokeId;
+    if (decision === 'GRANTED') {
+      const known = this.revocations.get(route_grant.grant_hash);
+      const mismatch = route_revoke !== undefined && route_revoke.grant_hash !== route_grant.grant_hash;
+      const revoked = known ?? (route_revoke !== undefined && !mismatch ? route_revoke : undefined);
+      checks.push({ check: 'grant_not_revoked', passed: !revoked && !mismatch });
+      if (mismatch) {
+        decision = 'DENIED';
+        reasonCode = 'ROUTE_REVOKE_MISMATCH';
+        reason = 'The route_revoke passed names a different grant than route_grant. Pass the route_revoke issued for this grant, or none.';
+      } else if (revoked) {
+        decision = 'DENIED';
+        reasonCode = 'GRANT_REVOKED';
+        revokeId = typeof revoked.revoke_id === 'string' ? revoked.revoke_id : undefined;
+        reason = `Route grant ${route_grant.grant_id} was revoked${typeof revoked.revoked_at === 'string' ? ` at ${revoked.revoked_at}` : ''}; it authorizes nothing more.`;
       }
     }
 
@@ -295,6 +393,8 @@ export class LocalImmaculateEngine {
       transaction: transaction || null,
       decision,
       reason_code: reasonCode,
+      // Only on a decision a revocation made; canonical JSON drops undefined, so other records are unchanged.
+      revoke_id: revokeId,
     });
 
     return {

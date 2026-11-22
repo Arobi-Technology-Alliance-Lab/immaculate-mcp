@@ -7,6 +7,7 @@
  * Implements the Model Context Protocol (JSON-RPC 2.0 over stdio) locally with
  * zero external runtime dependencies:
  *   - arobi_route_grant        Seal a signed, bounded route grant locally
+ *   - arobi_revoke_grant       End a grant this server sealed before it expires & seal a ROUTE_REVOKE record
  *   - arobi_authorize          Evaluate an action against a route grant & seal AUTHORIZATION record
  *   - arobi_classify_and_route Pick the cheapest capable model or justify a quality exception
  *   - arobi_verify_chain       Re-derive SHA-256 hash-chain continuity & Ed25519 signatures
@@ -18,7 +19,7 @@ import { LocalImmaculateEngine } from './engine.mjs';
 const SERVER_INFO = {
   name: 'arobi-immaculate-mcp',
   title: 'Arobi Immaculate MCP (local engine)',
-  version: '1.1.0',
+  version: '1.2.0',
 };
 
 // What each tool does to this server's local chain, for MCP clients that decide by it (behaviour annotations). The
@@ -28,7 +29,7 @@ const APPENDS_LOCAL_CHAIN = { readOnlyHint: false, destructiveHint: false, idemp
 const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
 
 const SERVER_INSTRUCTIONS =
-  'Arobi Immaculate MCP server. Seal authority with arobi_route_grant, evaluate actions with arobi_authorize, choose policy-justified models with arobi_classify_and_route, and verify hash-chained records with arobi_verify_chain.';
+  'Arobi Immaculate MCP server. Seal authority with arobi_route_grant, end it early with arobi_revoke_grant, evaluate actions with arobi_authorize, choose policy-justified models with arobi_classify_and_route, and verify hash-chained records with arobi_verify_chain.';
 
 export const TOOL_DEFINITIONS = [
   {
@@ -62,9 +63,31 @@ export const TOOL_DEFINITIONS = [
         delegated_to: { type: 'string', description: 'Agent or workflow receiving delegated authority.' },
         attenuation: { type: 'string', description: 'Plain-language limits carried with the grant.' },
         expires_at: { type: 'string', description: 'ISO 8601 expiry timestamp (defaults to +24h).' },
-        revocable: { type: 'boolean', description: 'Whether the grant can be revoked (default true).' },
+        revocable: { type: 'boolean', description: 'Whether arobi_revoke_grant can end the grant before it expires (default true).' },
       },
       required: ['route_id', 'scope', 'granted_by', 'delegated_to'],
+    },
+  },
+  {
+    name: 'arobi_revoke_grant',
+    title: 'Revoke a route grant',
+    description:
+      'End a route grant this server sealed before it expires: seal a hash-chained ROUTE_REVOKE record and return route_revoke. From then on arobi_authorize DENIES the grant (GRANT_REVOKED). A grant that is unsigned, signed by another key, sealed with revocable: false, expired or already revoked is REFUSED with a reason code, and nothing is sealed. Like the signing key, a revocation lasts for this server run.',
+    annotations: { title: 'Revoke a route grant', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        route_grant: {
+          type: 'object',
+          description: 'The route_grant to revoke, exactly as arobi_route_grant returned it in this server run.',
+        },
+        reason: {
+          type: 'string',
+          maxLength: 2000,
+          description: 'Optional. Why the grant is revoked, up to 2,000 characters; carried in the ROUTE_REVOKE record.',
+        },
+      },
+      required: ['route_grant'],
     },
   },
   {
@@ -72,13 +95,18 @@ export const TOOL_DEFINITIONS = [
     title: 'Authorize an agent action',
     annotations: { title: 'Authorize an agent action', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Decide whether an agent action is permitted against a route grant this server sealed, and seal a hash-chained AUTHORIZATION record. Returns GRANTED, DENIED, or ESCALATED with checks and reason code. A grant that is unsigned, or signed by any other key, is DENIED; the signing key is made when the server starts, so a grant is good for the run that sealed it.',
+      'Decide whether an agent action is permitted against a route grant this server sealed, and seal a hash-chained AUTHORIZATION record. Returns GRANTED, DENIED, or ESCALATED with checks and reason code. A grant that is unsigned, signed by any other key, or revoked with arobi_revoke_grant is DENIED; the signing key is made when the server starts, so a grant is good for the run that sealed it.',
     inputSchema: {
       type: 'object',
       properties: {
         route_grant: {
           type: 'object',
           description: 'The route_grant object returned by arobi_route_grant in this server run.',
+        },
+        route_revoke: {
+          type: 'object',
+          description:
+            'Optional. The route_revoke arobi_revoke_grant returned for this grant. This server already knows its own revocations, so the grant is DENIED either way; one that names a different grant is DENIED as ROUTE_REVOKE_MISMATCH.',
         },
         action: { type: 'string', description: 'Action name, e.g. issue.refund' },
         consequence_tier: {
@@ -166,7 +194,7 @@ export const TOOL_DEFINITIONS = [
         records: {
           type: 'array',
           description:
-            'Ordered array of sealed records returned by arobi_route_grant, arobi_authorize, or arobi_classify_and_route.',
+            'Ordered array of sealed records returned by arobi_route_grant, arobi_revoke_grant, arobi_authorize, or arobi_classify_and_route.',
           items: { type: 'object' },
         },
         expected_signer_kid: {
@@ -193,6 +221,8 @@ function handleToolCall(name, args) {
   switch (name) {
     case 'arobi_route_grant':
       return engine.routeGrant(args);
+    case 'arobi_revoke_grant':
+      return engine.revokeGrant(args);
     case 'arobi_authorize':
       return engine.authorize(args);
     case 'arobi_classify_and_route':

@@ -12,7 +12,7 @@ function call(id, name, args) {
   return handleJsonRpc({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }).result;
 }
 
-test('MCP initialize, ping, and tools/list return all 4 tools', () => {
+test('MCP initialize, ping, and tools/list return all 5 tools', () => {
   const init = handleJsonRpc({
     jsonrpc: '2.0',
     id: 1,
@@ -28,6 +28,7 @@ test('MCP initialize, ping, and tools/list return all 4 tools', () => {
   const names = list.result.tools.map((t) => t.name);
   assert.deepEqual(names, [
     'arobi_route_grant',
+    'arobi_revoke_grant',
     'arobi_authorize',
     'arobi_classify_and_route',
     'arobi_verify_chain',
@@ -283,7 +284,84 @@ test('every tool is titled and annotated, and every parameter is described', () 
   }
   assert.deepEqual(missing, []);
   const readOnly = Object.fromEntries(list.result.tools.map((tool) => [tool.name, tool.annotations.readOnlyHint]));
-  assert.deepEqual(readOnly, { arobi_route_grant: false, arobi_authorize: false, arobi_classify_and_route: false, arobi_verify_chain: true });
+  assert.deepEqual(readOnly, { arobi_route_grant: false, arobi_revoke_grant: false, arobi_authorize: false, arobi_classify_and_route: false, arobi_verify_chain: true });
+  const destructive = list.result.tools.filter((tool) => tool.annotations.destructiveHint).map((tool) => tool.name);
+  assert.deepEqual(destructive, ['arobi_revoke_grant']);
   const init = handleJsonRpc({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
   assert.ok(init.result.serverInfo.title);
+});
+
+// Lifecycle (2026-11-21): a grant can be ended before it expires. Revoking seals a ROUTE_REVOKE record in the same
+// chain, the grant is DENIED from then on, and only this run's own, revocable, live, unrevoked grants can be revoked.
+test('arobi_revoke_grant ends a grant: DENIED afterwards, chained, and refused for grants it may not revoke', () => {
+  const engine = new LocalImmaculateEngine();
+  const grantArgs = { route_id: 'refunds', scope: { actions: ['issue.refund'] }, granted_by: 'ops-director', delegated_to: 'support-agent' };
+  const ask = { action: 'issue.refund', consequence_tier: 'low', principal: 'support-agent' };
+
+  const g = engine.routeGrant(grantArgs);
+  const before = engine.authorize({ ...ask, route_grant: g.route_grant });
+  assert.equal(before.decision, 'GRANTED');
+
+  const rv = engine.revokeGrant({ route_grant: g.route_grant, reason: 'Agent retired from the refunds queue.' });
+  assert.equal(rv.status, 'REVOKED');
+  assert.equal(rv.record.record_type, 'ROUTE_REVOKE');
+  assert.equal(rv.record.prev_hash, before.record.record_hash);
+  assert.equal(rv.route_revoke.grant_hash, g.route_grant.grant_hash);
+  assert.equal(rv.route_revoke.signer_kid, engine.signerKid);
+  assert.equal(rv.record.payload.reason, 'Agent retired from the refunds queue.');
+
+  const after = engine.authorize({ ...ask, route_grant: g.route_grant });
+  assert.equal(after.decision, 'DENIED');
+  assert.equal(after.reason_code, 'GRANT_REVOKED');
+  assert.equal(after.record.payload.revoke_id, rv.route_revoke.revoke_id);
+  assert.ok(after.checks.some((c) => c.check === 'grant_not_revoked' && c.passed === false));
+
+  // Passing the route_revoke too changes nothing; a route_revoke for another grant is refused, not ignored.
+  assert.equal(engine.authorize({ ...ask, route_grant: g.route_grant, route_revoke: rv.route_revoke }).reason_code, 'GRANT_REVOKED');
+  const other = engine.routeGrant({ ...grantArgs, route_id: 'refunds-2' });
+  const mismatch = engine.authorize({ ...ask, route_grant: other.route_grant, route_revoke: rv.route_revoke });
+  assert.equal(mismatch.decision, 'DENIED');
+  assert.equal(mismatch.reason_code, 'ROUTE_REVOKE_MISMATCH');
+  assert.equal(engine.authorize({ ...ask, route_grant: other.route_grant }).decision, 'GRANTED');
+
+  // Twice: refused, with the first revocation.
+  const again = engine.revokeGrant({ route_grant: g.route_grant });
+  assert.equal(again.status, 'REFUSED');
+  assert.equal(again.reason_code, 'GRANT_ALREADY_REVOKED');
+  assert.equal(again.route_revoke.revoke_id, rv.route_revoke.revoke_id);
+
+  // Not this run's grant, not signed, tampered, not revocable, or already expired: refused, nothing sealed.
+  const length = engine.chain.length;
+  const foreign = new LocalImmaculateEngine().routeGrant(grantArgs).route_grant;
+  assert.equal(engine.revokeGrant({ route_grant: foreign }).reason_code, 'GRANT_FOREIGN_SIGNER');
+  assert.equal(engine.revokeGrant({ route_grant: { route_id: 'x', scope: { actions: ['*'] } } }).reason_code, 'GRANT_UNSIGNED');
+  assert.equal(engine.revokeGrant({ route_grant: { ...other.route_grant, scope: { actions: ['*'] } } }).reason_code, 'GRANT_SIGNATURE_INVALID');
+  const fixed = engine.routeGrant({ ...grantArgs, route_id: 'fixed', revocable: false });
+  assert.equal(engine.revokeGrant({ route_grant: fixed.route_grant }).reason_code, 'GRANT_NOT_REVOCABLE');
+  assert.equal(engine.authorize({ ...ask, route_grant: fixed.route_grant }).decision, 'GRANTED');
+  const expired = engine.routeGrant({ ...grantArgs, route_id: 'old', expires_at: '2020-01-01T00:00:00.000Z' });
+  assert.equal(engine.revokeGrant({ route_grant: expired.route_grant }).reason_code, 'GRANT_EXPIRED');
+  assert.equal(engine.chain.length, length + 3, 'only the two new grants and the one authorization were sealed');
+  assert.throws(() => engine.revokeGrant({ route_grant: g.route_grant, reason: 'x'.repeat(2001) }), /2,000/);
+  assert.throws(() => engine.authorize({ ...ask, route_grant: g.route_grant, route_revoke: 'rv_1' }), /route_revoke/);
+
+  // The whole run, revocation included, is one chain signed by this run's key.
+  const verified = engine.verifyChain({ records: engine.chain, expected_signer_kid: engine.signerKid });
+  assert.equal(verified.valid, true);
+  assert.equal(verified.signer_pinned, true);
+});
+
+test('arobi_revoke_grant over MCP: REVOKED, then the grant is DENIED', () => {
+  const grant = call(40, 'arobi_route_grant', { route_id: 'mcp-revoke', scope: { actions: ['ticket.close'] }, granted_by: 'owner', delegated_to: 'agent' });
+  const routeGrant = grant.structuredContent.route_grant;
+  const revoked = call(41, 'arobi_revoke_grant', { route_grant: routeGrant, reason: 'Done for today.' });
+  assert.equal(revoked.isError, false);
+  assert.equal(revoked.structuredContent.status, 'REVOKED');
+  const denied = call(42, 'arobi_authorize', { route_grant: routeGrant, action: 'ticket.close', consequence_tier: 'low', principal: 'agent' });
+  assert.equal(denied.structuredContent.decision, 'DENIED');
+  assert.equal(denied.structuredContent.reason_code, 'GRANT_REVOKED');
+  // The text content an MCP client reads carries the same verdict and names the revocation.
+  const text = JSON.parse(denied.content[0].text);
+  assert.equal(text.record.payload.revoke_id, revoked.structuredContent.route_revoke.revoke_id);
+  assert.equal(text.record.prev_hash, revoked.structuredContent.record.record_hash);
 });
