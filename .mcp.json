@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "arobi-immaculate-cloud": {
+      "url": "https://aura-genesis.org/api/v1/mcp",
+      "headers": {
+        "X-Arobi-Tenant-Key": "${env:AROBI_TENANT_KEY}"
+      }
+    },
+    "arobi-immaculate": {
+      "command": "node",
+      "args": ["${workspaceFolder}/src/index.mjs"]
+    }
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
