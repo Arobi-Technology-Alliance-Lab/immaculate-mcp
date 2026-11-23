@@ -8,6 +8,13 @@
  */
 
 import crypto from 'node:crypto';
+import {
+  complexityOf, evidenceFromHistory, FEATURE_NAMES, routeFeatures, thresholdForStrongRate, winProbability,
+} from './route-learning.mjs';
+
+// How much routing evidence one run keeps (oldest dropped first): win probabilities for calibration, outcomes and
+// pairwise preferences, and the routing decisions outcomes can refer to.
+const ROUTE_MEMORY = 5000;
 
 export function canonicalJson(value) {
   if (value === null || typeof value !== 'object') {
@@ -65,6 +72,16 @@ export class LocalImmaculateEngine {
     // Grants revoked in this run, by grant_hash. Like the key, they last for the run: a restarted server honours none
     // of the old run's grants anyway.
     this.revocations = new Map();
+    // Learned escalation (RouteLLM-style): content-free evidence, the run's past win probabilities for threshold
+    // calibration, and the recorded routing decisions an outcome can refer to. Like the key, these last for the run.
+    this.routeEvidence = [];
+    this.winScores = [];
+    this.routeDecisions = new Map();
+  }
+
+  remember(list, item) {
+    list.push(item);
+    if (list.length > ROUTE_MEMORY) list.shift();
   }
 
   // grantStatus says whether route_grant was sealed by this engine: 'ok', 'unsigned', 'foreign' (signed with
@@ -417,12 +434,9 @@ export class LocalImmaculateEngine {
       throw new Error('candidates (non-empty array) is required.');
     }
 
-    const lower = prompt.toLowerCase();
-    const highSignals = /(architect|proof|cryptograph|security audit|distributed|concurrent|formal|migration|multi-step|incident)/;
-    const mediumSignals = /(refactor|implement|analyze|debug|compare|design|summarize|test suite|sql)/;
-    let complexity = 'low';
-    if (prompt.length > 600 || highSignals.test(lower)) complexity = 'high';
-    else if (prompt.length > 160 || mediumSignals.test(lower)) complexity = 'medium';
+    // Eight content-free numbers stand for the request; the text is hashed and never kept.
+    const features = routeFeatures(prompt);
+    const complexity = complexityOf(prompt, features);
 
     const promptHash = sha256Hex(prompt.trim());
     const priorEntry = this.seenPrompts.get(promptHash);
@@ -500,6 +514,71 @@ export class LocalImmaculateEngine {
       }
     }
 
+    // Learned escalation (opt-in through `escalation`): pay for a dearer capable candidate only when the chance its
+    // answer beats the cheapest capable one on THIS request clears the cost threshold (RouteLLM, Eq. 2). The capability
+    // floor and max_premium_usd still bound it, and it can only escalate, never undo an explicit quality_exception.
+    let escalationResult;
+    const escalation = args.escalation;
+    if (escalation !== undefined) {
+      if (!escalation || typeof escalation !== 'object') throw new Error('escalation must be an object.');
+      const { cost_threshold, target_strong_rate, strong_candidate, max_premium_usd } = escalation;
+      if (cost_threshold !== undefined && !(typeof cost_threshold === 'number' && cost_threshold >= 0 && cost_threshold <= 1)) {
+        throw new Error('escalation.cost_threshold must be a number from 0 to 1.');
+      }
+      if (target_strong_rate !== undefined && !(typeof target_strong_rate === 'number' && target_strong_rate >= 0 && target_strong_rate <= 1)) {
+        throw new Error('escalation.target_strong_rate must be a number from 0 to 1.');
+      }
+      const premiumCap = max_premium_usd !== undefined ? Number(max_premium_usd) : Infinity;
+      const dearer = capable.filter((c) => c !== cheapest && c.total_unit_cost_usd - cheapest.total_unit_cost_usd <= premiumCap);
+      let strong = null;
+      if (strong_candidate !== undefined) {
+        strong = dearer.find((c) => c.id === strong_candidate) ?? null;
+      } else if (dearer.length > 0) {
+        // The likeliest-best dearer candidate: the highest observed success rate, then the dearer one.
+        strong = [...dearer].sort((a, b) => ((b.observed_success_rate ?? -1) - (a.observed_success_rate ?? -1))
+          || (b.total_unit_cost_usd - a.total_unit_cost_usd))[0];
+      }
+      if (!strong) {
+        escalationResult = {
+          escalated: false,
+          reason: strong_candidate !== undefined
+            ? `strong_candidate ${strong_candidate} is not a capable candidate within the premium cap.`
+            : 'No dearer capable candidate within the premium cap.',
+        };
+      } else {
+        const evidence = [...this.routeEvidence, ...evidenceFromHistory(args.preference_history)];
+        const win = winProbability({ features, weakId: cheapest.id, strongId: strong.id, evidence, complexity });
+        let threshold = cost_threshold;
+        let thresholdSource = 'cost_threshold';
+        if (threshold === undefined && target_strong_rate !== undefined) {
+          const calibrated = thresholdForStrongRate(this.winScores, target_strong_rate);
+          threshold = calibrated ?? 0.5;
+          thresholdSource = calibrated === null ? 'default_until_20_scores' : 'calibrated_to_target_strong_rate';
+        }
+        if (threshold === undefined) {
+          threshold = 0.5;
+          thresholdSource = 'default';
+        }
+        this.remember(this.winScores, win.p);
+        const escalate = win.p >= threshold && selected !== strong;
+        if (escalate) {
+          selected = strong;
+          justificationType = 'learned_escalation';
+          justification = `Escalated to ${strong.id}: P(it beats ${cheapest.id} on this request) = ${win.p} >= cost threshold ${threshold} (${win.source}).`;
+        }
+        escalationResult = {
+          escalated: escalate,
+          strong_id: strong.id,
+          win_probability: win.p,
+          win_probability_source: win.source,
+          pair_evidence: win.pair_evidence,
+          outcome_evidence: win.outcome_evidence,
+          cost_threshold: threshold,
+          cost_threshold_source: thresholdSource,
+        };
+      }
+    }
+
     const premiumUsd = Number((selected.total_unit_cost_usd - cheapest.total_unit_cost_usd).toFixed(6));
 
     let sealed = null;
@@ -512,8 +591,16 @@ export class LocalImmaculateEngine {
         premium_usd: premiumUsd,
         justification_type: justificationType,
         already_done: alreadyDone,
+        // Only when escalation was asked for; canonical JSON drops undefined, so other records are unchanged.
+        features: escalationResult ? features : undefined,
+        escalation: escalationResult,
       });
       this.seenPrompts.set(promptHash, { selected_id: selected.id, record_hash: sealed.record_hash });
+      this.routeDecisions.set(sealed.record_hash, {
+        features, cheapest_id: cheapest.id, selected_id: selected.id, escalated: Boolean(escalationResult?.escalated),
+        candidate_ids: capable.map((c) => c.id),
+      });
+      if (this.routeDecisions.size > ROUTE_MEMORY) this.routeDecisions.delete(this.routeDecisions.keys().next().value);
     }
 
     return {
@@ -532,6 +619,73 @@ export class LocalImmaculateEngine {
       premium_usd: premiumUsd,
       justification_type: justificationType,
       justification,
+      ...(escalationResult ? { escalation: escalationResult, features: Object.fromEntries(FEATURE_NAMES.map((n, i) => [n, features[i]])) } : {}),
+      mode: 'local',
+      ...(sealed ? { record: sealed } : {}),
+    };
+  }
+
+  // recordRouteOutcome feeds learned escalation: how a routed request turned out (a quality in [0, 1], or ok), and
+  // optionally how it compared with another candidate on the same request. It refers to a ROUTING_DECISION this run
+  // sealed, takes that decision's content-free features, and seals a ROUTE_OUTCOME record. No text is involved.
+  recordRouteOutcome(args) {
+    if (!args || typeof args !== 'object') throw new Error('Arguments object is required.');
+    const { routing_record_hash, candidate_id, quality, ok, compared_with, record: shouldRecord = true } = args;
+    const decision = typeof routing_record_hash === 'string' ? this.routeDecisions.get(routing_record_hash) : undefined;
+    if (!decision) throw new Error('routing_record_hash must name a ROUTING_DECISION this server sealed in this run.');
+    const candidateId = candidate_id ?? decision.selected_id;
+    if (!decision.candidate_ids.includes(candidateId)) throw new Error(`candidate_id ${candidateId} was not a capable candidate of that decision.`);
+    let q;
+    if (typeof quality === 'number') {
+      if (!(quality >= 0 && quality <= 1)) throw new Error('quality must be from 0 to 1.');
+      q = quality;
+    } else if (typeof ok === 'boolean') {
+      q = ok ? 1 : 0;
+    } else {
+      throw new Error('Give quality (0 to 1) or ok (boolean).');
+    }
+    let pair = null;
+    if (compared_with !== undefined) {
+      const other = compared_with?.candidate_id;
+      const result = compared_with?.result;
+      if (typeof other !== 'string' || other === candidateId || !decision.candidate_ids.includes(other)) {
+        throw new Error('compared_with.candidate_id must be another capable candidate of that decision.');
+      }
+      if (!['win', 'loss', 'tie'].includes(result)) throw new Error("compared_with.result must be 'win', 'loss' or 'tie'.");
+      pair = result === 'tie'
+        ? { kind: 'pair', features: decision.features, a: candidateId, b: other, tie: true }
+        : { kind: 'pair', features: decision.features, a: result === 'win' ? candidateId : other, b: result === 'win' ? other : candidateId, tie: false };
+    }
+    this.remember(this.routeEvidence, { kind: 'outcome', features: decision.features, candidate_id: candidateId, quality: q });
+    if (pair) this.remember(this.routeEvidence, pair);
+    const sealed = shouldRecord
+      ? this.sealRecord('ROUTE_OUTCOME', {
+        routing_record_hash,
+        candidate_id: candidateId,
+        quality: q,
+        compared_with: pair ? { candidate_id: compared_with.candidate_id, result: compared_with.result } : undefined,
+      })
+      : null;
+    const outcomes = this.routeEvidence.filter((e) => e.kind === 'outcome');
+    const byCandidate = {};
+    for (const e of outcomes) {
+      byCandidate[e.candidate_id] ??= { n: 0, mean_quality: 0 };
+      const c = byCandidate[e.candidate_id];
+      c.mean_quality = (c.mean_quality * c.n + e.quality) / (c.n + 1);
+      c.n += 1;
+    }
+    for (const c of Object.values(byCandidate)) c.mean_quality = Number(c.mean_quality.toFixed(4));
+    const decisions = [...this.routeDecisions.values()];
+    return {
+      status: 'RECORDED',
+      candidate_id: candidateId,
+      quality: q,
+      evidence: { outcomes: outcomes.length, pairs: this.routeEvidence.length - outcomes.length },
+      stats: {
+        decisions: decisions.length,
+        escalated_share: decisions.length ? Number((decisions.filter((d) => d.escalated).length / decisions.length).toFixed(4)) : 0,
+        by_candidate: byCandidate,
+      },
       mode: 'local',
       ...(sealed ? { record: sealed } : {}),
     };
