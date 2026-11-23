@@ -19,7 +19,7 @@ import { LocalImmaculateEngine } from './engine.mjs';
 const SERVER_INFO = {
   name: 'arobi-immaculate-mcp',
   title: 'Arobi Immaculate MCP (local engine)',
-  version: '1.2.0',
+  version: '1.3.0',
 };
 
 // What each tool does to this server's local chain, for MCP clients that decide by it (behaviour annotations). The
@@ -137,7 +137,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Choose the cheapest capable route',
     annotations: { title: 'Choose the cheapest capable route', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Classify a prompt and choose the cheapest route capable of the work from your candidate set, reporting whether any cost above the cheapest capable route is justified by required_capabilities or an explicit quality_exception policy. Set record=false to preview without appending to the local chain.',
+      'Classify a prompt and choose the cheapest route capable of the work from your candidate set, reporting whether any cost above the cheapest capable route is justified by required_capabilities, an explicit quality_exception policy, or learned escalation. With escalation set, a dearer capable candidate is chosen only when the predicted chance it beats the cheapest capable one on this request (similarity-weighted over recorded outcomes, after RouteLLM) reaches the cost threshold. No prompt text is kept: the request becomes eight content-free numbers. Set record=false to preview without appending to the local chain.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -174,12 +174,69 @@ export const TOOL_DEFINITIONS = [
           },
           required: ['min_success_uplift', 'min_sample_size'],
         },
+        escalation: {
+          type: 'object',
+          description:
+            'Optional learned escalation. Escalate from the cheapest capable candidate to a dearer one only when P(the dearer one wins on this request) >= the cost threshold. It never picks an incapable candidate and never undoes quality_exception.',
+          properties: {
+            cost_threshold: { type: 'number', description: 'Escalate when the win probability is at least this, 0 to 1. Higher saves more.' },
+            target_strong_rate: {
+              type: 'number',
+              description: 'Instead of cost_threshold: the share of requests (0 to 1) you want escalated; the threshold is calibrated from this run\'s past win probabilities once there are 20.',
+            },
+            strong_candidate: { type: 'string', description: 'Which dearer candidate to consider; default the dearer capable one with the highest observed success rate.' },
+            max_premium_usd: { type: 'number', description: 'The most extra USD per 1,000 prompt plus completion tokens an escalation may cost.' },
+          },
+        },
+        preference_history: {
+          type: 'array',
+          description:
+            'Optional evidence you kept from earlier runs, content-free: each item has features (the eight numbers a past answer reported) and either winner_id and loser_id, tie [a, b], or candidate_id with quality 0 to 1.',
+          items: {
+            type: 'object',
+            properties: {
+              features: { type: 'array', items: { type: 'number' }, description: 'The eight feature numbers of that request, each 0 to 1.' },
+              winner_id: { type: 'string', description: 'The candidate whose answer was better.' },
+              loser_id: { type: 'string', description: 'The candidate whose answer was worse.' },
+              tie: { type: 'array', items: { type: 'string' }, description: 'Two candidate ids whose answers were as good as each other.' },
+              candidate_id: { type: 'string', description: 'The candidate an outcome is about.' },
+              quality: { type: 'number', description: 'That outcome\'s quality, 0 to 1 (1 = fully successful).' },
+            },
+          },
+        },
         record: {
           type: 'boolean',
           description: 'Default true. Set false to evaluate without sealing a chain record.',
         },
       },
       required: ['prompt', 'candidates'],
+    },
+  },
+  {
+    name: 'arobi_record_route_outcome',
+    title: 'Record how a routed request turned out',
+    annotations: { title: 'Record how a routed request turned out', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'Teach learned escalation: record the outcome of a request routed by arobi_classify_and_route in this run (quality 0 to 1, or ok), and optionally how it compared with another candidate on the same request. Uses that decision\'s content-free features, seals a ROUTE_OUTCOME record, and returns the run\'s routing stats.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        routing_record_hash: { type: 'string', description: 'record_hash of the ROUTING_DECISION record the outcome is about.' },
+        candidate_id: { type: 'string', description: 'The candidate that answered; default the one that decision selected.' },
+        quality: { type: 'number', description: 'How good the answer was, 0 to 1.' },
+        ok: { type: 'boolean', description: 'Instead of quality: true for a successful answer (1), false for a failed one (0).' },
+        compared_with: {
+          type: 'object',
+          description: 'Optional: a comparison with another capable candidate of the same decision on this request.',
+          properties: {
+            candidate_id: { type: 'string', description: 'The other candidate.' },
+            result: { type: 'string', enum: ['win', 'loss', 'tie'], description: 'How candidate_id did against it.' },
+          },
+          required: ['candidate_id', 'result'],
+        },
+        record: { type: 'boolean', description: 'Default true. Set false to learn from it without sealing a chain record.' },
+      },
+      required: ['routing_record_hash'],
     },
   },
   {
@@ -227,6 +284,8 @@ function handleToolCall(name, args) {
       return engine.authorize(args);
     case 'arobi_classify_and_route':
       return engine.classifyAndRoute(args);
+    case 'arobi_record_route_outcome':
+      return engine.recordRouteOutcome(args);
     case 'arobi_verify_chain':
       return engine.verifyChain(args);
     default:
