@@ -60,6 +60,75 @@
           "pgr_at_20pct_strong": 1.4228,
           "distinct_scores": 3
         }
+      },
+      "bootstrap": {
+        "method": "paired percentile bootstrap over test questions, 10000 resamples, seed 20261124, cross-validated scores held fixed (the router-apgr suites' method)",
+        "apgr_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.6582,
+            0.6969
+          ],
+          "learned": [
+            0.4781,
+            0.5141
+          ],
+          "learned_within_class": [
+            0.6585,
+            0.6976
+          ],
+          "oracle": [
+            1.2422,
+            1.3338
+          ]
+        },
+        "cpt50_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.2446,
+            0.2996
+          ],
+          "learned": [
+            0.4786,
+            0.5333
+          ],
+          "learned_within_class": [
+            0.2348,
+            0.29
+          ],
+          "oracle": [
+            0.0587,
+            0.0664
+          ]
+        },
+        "paired_differences": [
+          {
+            "comparison": "learned, same subject minus learned, all evidence",
+            "a": "learned_within_class",
+            "b": "learned",
+            "apgr_difference_95ci": [
+              0.1555,
+              0.2075
+            ],
+            "share_of_resamples_a_better": 1
+          },
+          {
+            "comparison": "learned, same subject minus the class-level rate",
+            "a": "learned_within_class",
+            "b": "class_level",
+            "apgr_difference_95ci": [
+              -0.0028,
+              0.0043
+            ],
+            "share_of_resamples_a_better": 0.6474
+          }
+        ]
       }
     },
     {
@@ -106,6 +175,75 @@
           "pgr_at_20pct_strong": 0.9167,
           "distinct_scores": 3
         }
+      },
+      "bootstrap": {
+        "method": "paired percentile bootstrap over test questions, 10000 resamples, seed 20261124, cross-validated scores held fixed (the router-apgr suites' method)",
+        "apgr_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.4383,
+            0.5166
+          ],
+          "learned": [
+            0.4648,
+            0.5411
+          ],
+          "learned_within_class": [
+            0.4648,
+            0.5411
+          ],
+          "oracle": [
+            1.0458,
+            1.2257
+          ]
+        },
+        "cpt50_95ci": {
+          "random": [
+            0.5004,
+            0.5004
+          ],
+          "class_level": [
+            0.4685,
+            0.6012
+          ],
+          "learned": [
+            0.4382,
+            0.5754
+          ],
+          "learned_within_class": [
+            0.4382,
+            0.5754
+          ],
+          "oracle": [
+            0.094,
+            0.1243
+          ]
+        },
+        "paired_differences": [
+          {
+            "comparison": "learned, same subject minus learned, all evidence",
+            "a": "learned_within_class",
+            "b": "learned",
+            "apgr_difference_95ci": [
+              0,
+              0
+            ],
+            "share_of_resamples_a_better": 0
+          },
+          {
+            "comparison": "learned, same subject minus the class-level rate",
+            "a": "learned_within_class",
+            "b": "class_level",
+            "apgr_difference_95ci": [
+              -0.0116,
+              0.0634
+            ],
+            "share_of_resamples_a_better": 0.9063
+          }
+        ]
       }
     }
   ]

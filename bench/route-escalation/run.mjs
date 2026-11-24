@@ -9,7 +9,8 @@
  * top share c of questions to the strong model gives accuracy r(c); PGR(c) = (r(c) - r_weak) / (r_strong - r_weak);
  * APGR is the mean PGR over c in [0, 1]; CPT(x) is the smallest strong-call share that reaches PGR x. Random routing
  * scores APGR 0.5. Equal scores are averaged over random tie-breaking, so no router gains from their order.
- * Evidence never crosses folds: 5-fold cross-validation over a seeded shuffle. Each training question contributes two
+ * Evidence never crosses folds: 5-fold cross-validation over a seeded shuffle. 95% intervals: a paired bootstrap over
+ * the test questions with the cross-validated scores held fixed (bootstrap() below). Each training question contributes two
  * outcome records (weak right?, strong right?) with its eight content-free features, which is all the engine keeps.
  *
  * In-distribution cross-validation: training and test questions come from the same benchmark. RouteLLM's own tables
@@ -166,6 +167,112 @@ function metrics(items, score) {
   };
 }
 
+const COMPARISONS = [
+  ['learned, same subject minus learned, all evidence', 'learned_within_class', 'learned'],
+  ['learned, same subject minus the class-level rate', 'learned_within_class', 'class_level'],
+];
+
+// 95% intervals, by the same method as the public router-apgr suites (arobi-benchmarks scorer/apgr.mjs): a paired
+// percentile bootstrap over test questions with the cross-validated scores held fixed, 10,000 resamples, seed
+// 20261124. Each resample is the same sorted list with a multiplicity per question (so it costs O(n)), and every
+// router shares it. mulberry32 and the interpolated quantile are copied from the suites' tools/bootstrap.mjs.
+const BOOT = 10000;
+const BOOT_SEED = 20261124;
+
+function mulberry32(seed) {
+  let state = (Number(seed) >>> 0) || 1;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function quantileSorted(sorted, q) {
+  const position = (sorted.length - 1) * q;
+  const below = Math.floor(position);
+  const above = Math.ceil(position);
+  return sorted[below] + (sorted[above] - sorted[below]) * (position - below);
+}
+
+function tieGroups(score) {
+  const order = Array.from({ length: score.length }, (_, i) => i).sort((a, b) => score[b] - score[a] || a - b);
+  const groups = [];
+  for (let k = 0; k < order.length;) {
+    let end = k;
+    while (end + 1 < order.length && score[order[end + 1]] === score[order[k]]) end += 1;
+    groups.push(order.slice(k, end + 1));
+    k = end + 1;
+  }
+  return groups;
+}
+
+/** APGR and CPT(50%) for one router with a weight (multiplicity) per question: apgr.mjs's curveMetrics. */
+function weightedCurve(groups, weak, strong, weight) {
+  let n = 0;
+  let gap = 0;
+  for (const group of groups) for (const i of group) { n += weight[i]; gap += weight[i] * (strong[i] - weak[i]); }
+  if (!(gap > 0)) throw new Error(`the strong model does not score above the weak one on this sample (gap ${gap})`);
+  let area = 0;
+  let k0 = 0;
+  let total = 0;
+  let cpt50 = null;
+  for (const group of groups) {
+    let s = 0;
+    let g = 0;
+    for (const i of group) { s += weight[i]; g += weight[i] * (strong[i] - weak[i]); }
+    if (s === 0) continue;
+    area += (s * total + (g * s) / 2) / gap;
+    if (cpt50 === null && (total + g) / gap >= 0.5 - 1e-12) {
+      const j = g > 0 ? Math.min(s, Math.max(1, Math.ceil((((0.5 - 1e-12) * gap - total) * s) / g))) : 1;
+      cpt50 = (k0 + j) / n;
+    }
+    total += g;
+    k0 += s;
+  }
+  return { apgr: area / n, cpt50 };
+}
+
+function bootstrap(items, scores) {
+  const n = items.length;
+  const routers = Object.keys(scores);
+  const weak = Float64Array.from(items, (item) => item.weak);
+  const strong = Float64Array.from(items, (item) => item.strong);
+  const groups = Object.fromEntries(routers.map((r) => [r, tieGroups(scores[r])]));
+  // The grouped computation must reproduce metrics() on the full sample before it is trusted on resamples.
+  const unit = new Float64Array(n).fill(1);
+  for (const r of routers) {
+    const full = weightedCurve(groups[r], weak, strong, unit);
+    if (Math.abs(Number(full.apgr.toFixed(4)) - metrics(items, scores[r]).apgr) > 1e-4) throw new Error(`weightedCurve disagrees with metrics() for ${r}`);
+  }
+  const draws = Object.fromEntries(routers.map((r) => [r, { apgr: [], cpt50: [] }]));
+  const random = mulberry32(BOOT_SEED);
+  const weight = new Float64Array(n);
+  for (let b = 0; b < BOOT; b += 1) {
+    weight.fill(0);
+    for (let i = 0; i < n; i += 1) weight[Math.floor(random() * n)] += 1;
+    for (const r of routers) {
+      const m = weightedCurve(groups[r], weak, strong, weight);
+      draws[r].apgr.push(m.apgr);
+      draws[r].cpt50.push(m.cpt50 ?? 1);
+    }
+  }
+  const ci = (values) => {
+    const sorted = Float64Array.from(values).sort();
+    return [Number(quantileSorted(sorted, 0.025).toFixed(4)), Number(quantileSorted(sorted, 0.975).toFixed(4))];
+  };
+  return {
+    method: `paired percentile bootstrap over test questions, ${BOOT} resamples, seed ${BOOT_SEED}, cross-validated scores held fixed (the router-apgr suites' method)`,
+    apgr_95ci: Object.fromEntries(routers.map((r) => [r, ci(draws[r].apgr)])),
+    cpt50_95ci: Object.fromEntries(routers.map((r) => [r, ci(draws[r].cpt50)])),
+    paired_differences: COMPARISONS.map(([label, a, b]) => {
+      const d = draws[a].apgr.map((x, i) => x - draws[b].apgr[i]);
+      return { comparison: label, a, b, apgr_difference_95ci: ci(d), share_of_resamples_a_better: Number((d.filter((x) => x > 0).length / d.length).toFixed(4)) };
+    }),
+  };
+}
+
 function evaluate(name, items) {
   const scores = scoreAll(items);
   return {
@@ -177,6 +284,7 @@ function evaluate(name, items) {
     weak_only_right: items.filter((i) => i.weak > i.strong).length,
     distinct_feature_vectors: new Set(items.map((i) => i.features.join(','))).size,
     routers: Object.fromEntries(Object.entries(scores).map(([router, s]) => [router, metrics(items, s)])),
+    bootstrap: bootstrap(items, scores),
   };
 }
 
@@ -203,6 +311,11 @@ writeFileSync(join(here, 'results.json'), `${JSON.stringify(results, null, 2)}\n
 for (const r of results.results) {
   console.log(`${r.dataset}: n=${r.questions} weak=${r.weak_accuracy} strong=${r.strong_accuracy} distinct feature vectors=${r.distinct_feature_vectors}`);
   for (const [name, m] of Object.entries(r.routers)) {
-    console.log(`  ${name.padEnd(22)} APGR ${m.apgr}  CPT(50%) ${m.cpt50}  CPT(80%) ${m.cpt80}  PGR@20% ${m.pgr_at_20pct_strong}`);
+    const a = r.bootstrap.apgr_95ci[name];
+    const c = r.bootstrap.cpt50_95ci[name];
+    console.log(`  ${name.padEnd(22)} APGR ${m.apgr} [${a[0]}, ${a[1]}]  CPT(50%) ${m.cpt50} [${c[0]}, ${c[1]}]  CPT(80%) ${m.cpt80}  PGR@20% ${m.pgr_at_20pct_strong}`);
+  }
+  for (const d of r.bootstrap.paired_differences) {
+    console.log(`  ${d.comparison}: APGR difference 95% CI [${d.apgr_difference_95ci[0]}, ${d.apgr_difference_95ci[1]}], better in ${d.share_of_resamples_a_better} of resamples`);
   }
 }
