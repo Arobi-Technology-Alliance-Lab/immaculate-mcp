@@ -279,7 +279,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Start an authorized effect',
     annotations: { title: 'Start an authorized effect', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Start the effect a GRANTED authorization allows, and seal EFFECT_STARTED: its steps, the postcondition a read-back must show, how it is undone, a deadline and the cleanup owner (default: the grant\'s issuer). Returns the effect (its attempt number and plan_digest) and a lease: pass attempt and lease.token with every step and the close, and give the downstream the effect_id as this attempt\'s request id. The lease ends at the deadline by the clock; an effect not closed by then reads IN_DOUBT, with no call needed from the executor. A retry with the same idempotency_key replays the start (without the lease) instead of applying it twice; only after that attempt closed ABORTED does the same key start the next attempt (at most 3). A start on a key with an open effect, or under a revoked or expired grant, is DENIED.',
+      'Start the effect a GRANTED authorization allows, and seal EFFECT_STARTED: its steps, the postcondition a read-back must show, how it is undone, a deadline and the cleanup owner (default: the grant\'s issuer). Returns the effect (its attempt number and plan_digest) and a lease: pass attempt and lease.token with every step and the close, and give the downstream the effect_id as this attempt\'s request id. The lease ends at the deadline by the clock; an effect not closed by then reads IN_DOUBT, with no call needed from the executor. A retry with the same idempotency_key replays the start (without the lease) instead of applying it twice; only after that attempt closed ABORTED does the same key start the next attempt (at most 3). A start on a key with an open effect, or under a revoked or expired grant, is DENIED. Say deadline_enforced_downstream: true only if the downstream refuses this attempt after its deadline; only then can the deadline fence it (EXPIRED_UNUSED).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -300,6 +300,7 @@ export const TOOL_DEFINITIONS = [
         deadline_sec: { type: 'integer', description: 'Seconds from now by which the effect is closed (1 to 604800); after that it reads IN_DOUBT.' },
         cleanup_owner: { type: 'string', description: 'Who cleans up if it is left part-done; default the grant\'s issuer.' },
         idempotency_key: { type: 'string', description: 'Your key for this effect (8 to 200 characters); a retry with the same key replays the start. Only its sha256 is sealed.' },
+        deadline_enforced_downstream: { type: 'boolean', description: 'True only if you pass deadline_at to the downstream as the call\'s own expiry and it refuses this attempt after it. Default false: then the deadline proves nothing about a call in flight, and an effect that saw nothing change is ABORTED only on the downstream\'s CONSUMED_NOT_RELEASED receipt.' },
       },
       required: ['authorization_record_hash', 'steps', 'postcondition', 'reversal', 'deadline_sec', 'idempotency_key'],
     },
@@ -329,7 +330,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Close an effect on its read-back',
     annotations: { title: 'Close an effect on its read-back', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Settle an attempt on its read-back, under its lease. The outcome is decided here, not asserted, and IN_DOUBT is the default: with no read-back, or a read-back that shows nothing changed but no fence, the effect stays IN_DOUBT (open, owned, its key still fenced), because a call that timed out may still land. COMMITTED needs a read-back that shows the postcondition and an ok receipt for every step. ABORTED needs a read-back that shows nothing changed and a fence: EXPIRED_UNUSED (the deadline has passed and the read-back was taken after it) or CONSUMED_NOT_RELEASED (the downstream\'s receipt that it took this attempt and will never apply it). PARTIAL otherwise. A read-back counts only if it was taken after the start, not in the future and within the last 5 minutes, with an evidence digest. A committed compensation also marks the effect it undoes COMPENSATED.',
+      'Settle an attempt on its read-back, under its lease. The outcome is decided here, not asserted, and IN_DOUBT is the default: with no read-back, or a read-back that shows nothing changed but no fence, the effect stays IN_DOUBT (open, owned, its key still fenced), because a call that timed out may still land. COMMITTED needs a read-back that shows the postcondition and an ok receipt for every step. ABORTED needs a read-back that shows nothing changed and a fence: CONSUMED_NOT_RELEASED (the downstream\'s receipt that it took this attempt and will never apply it), or EXPIRED_UNUSED (the deadline has passed and the read-back was taken after it), which counts only if the start said deadline_enforced_downstream: true. PARTIAL otherwise. A read-back counts only if it was taken after the start, not in the future and within the last 5 minutes, with an evidence digest. A committed compensation also marks the effect it undoes COMPENSATED.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -349,7 +350,7 @@ export const TOOL_DEFINITIONS = [
               type: 'object',
               description: 'Only with a read-back that shows nothing changed: why this attempt can no longer land.',
               properties: {
-                kind: { type: 'string', enum: ['EXPIRED_UNUSED', 'CONSUMED_NOT_RELEASED'], description: 'EXPIRED_UNUSED: the deadline has passed and the read-back was taken after it. CONSUMED_NOT_RELEASED: the downstream took this attempt and will never apply it.' },
+                kind: { type: 'string', enum: ['EXPIRED_UNUSED', 'CONSUMED_NOT_RELEASED'], description: 'EXPIRED_UNUSED: the deadline has passed, the read-back was taken after it, and the start said the downstream enforces the deadline. CONSUMED_NOT_RELEASED: the downstream took this attempt and will never apply it.' },
                 receipt_digest: { type: 'string', description: 'For CONSUMED_NOT_RELEASED: sha256 hex of the downstream\'s receipt saying so.' },
               },
               required: ['kind'],
@@ -390,7 +391,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Start the compensation of an effect',
     annotations: { title: 'Start the compensation of an effect', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it, with its own attempt number, lease and deadline, under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. It starts only once the original can no longer land (every step has an ok receipt, or its deadline has passed), never while the original is held by a lease, and never under a revoked or expired grant. A compensation that does not settle is IN_DOUBT like any effect, and no other compensation of the same effect starts until it is settled; at most 3 per effect. An IRREVERSIBLE effect cannot be compensated, only accepted.',
+      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it, with its own attempt number, lease and deadline, under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. It starts only once the original has stopped running (every step has an ok receipt, or its deadline has passed), never while the original is held by a lease, and never under a revoked or expired grant. If the original\'s deadline is not enforced downstream, a call of it in flight may still land after the compensation. A compensation that does not settle is IN_DOUBT like any effect, and no other compensation of the same effect starts until it is settled; at most 3 per effect. An IRREVERSIBLE effect cannot be compensated, only accepted.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -419,7 +420,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Accept an effect as it stands',
     annotations: { title: 'Accept an effect as it stands', ...APPENDS_LOCAL_CHAIN },
     description:
-      'A person accepts an IN_DOUBT or PARTIAL effect as it stands instead of compensating it, and EFFECT_ACCEPTED is sealed with who they are, how they authenticated (within the last 300 s) and why. Accepting closes the obligation, not the outcome: an IN_DOUBT effect stays unknown and a PARTIAL one keeps its receipts, and its key stays fenced until the attempt can no longer land. Refused while the effect is held by a lease or a compensation of it is open.',
+      'A person accepts an IN_DOUBT or PARTIAL effect as it stands instead of compensating it, and EFFECT_ACCEPTED is sealed with who they are, how they authenticated (within the last 300 s) and why. Accepting closes the obligation, not the outcome: an IN_DOUBT effect stays unknown and a PARTIAL one keeps its receipts, and its key stays fenced while the attempt can still land (until its deadline if the downstream enforces it, otherwise for the rest of this run). Refused while the effect is held by a lease or a compensation of it is open.',
     inputSchema: {
       type: 'object',
       properties: {

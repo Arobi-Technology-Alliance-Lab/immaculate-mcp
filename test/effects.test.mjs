@@ -227,7 +227,8 @@ test('5. a retry with the same idempotency key does not apply the effect twice',
 
 test('6. steps that exit 0 and change nothing are IN_DOUBT until the attempt is fenced, and ABORTED (never COMMITTED) after', () => {
   const { clock, authorize, start, step, readBack, close, claim } = setup();
-  const begun = start(authorize({ effect_key: 'deploy:site-a' }));
+  // The downstream refuses this attempt after its deadline, so the deadline can fence it.
+  const begun = start(authorize({ effect_key: 'deploy:site-a' }), { deadline_enforced_downstream: true });
   for (const name of ['upload', 'switch', 'purge-cache']) step(begun, name);
 
   // Before the fence. The read-back shows nothing changed, but this attempt can still be used until its deadline: a
@@ -345,7 +346,7 @@ test('rule 3. attempt fencing: nothing the first attempt holds changes the retry
   assert.equal(close(retry, readBack(shows)).outcome, 'COMMITTED');
 
   // A claim replaces a lapsed lease: the earlier holder's writes are refused from then on.
-  const other = start(authorize({ effect_key: 'deploy:site-b' }), { idempotency_key: 'deploy-b-1' });
+  const other = start(authorize({ effect_key: 'deploy:site-b' }), { idempotency_key: 'deploy-b-1', deadline_enforced_downstream: true });
   clock.t += 601_000;
   assert.equal(step(other, 'upload').reason_code, 'LEASE_EXPIRED');
   const reconciler = claim(other);
@@ -437,7 +438,7 @@ test('rule 6. recovery is bounded: an unsettled compensation is IN_DOUBT and blo
     return engine.compensateEffect({
       effect_id: originalId, authorization_record_hash: auth.record.record_hash, steps: ['restore-previous'],
       postcondition: 'site-a serves release 41', reversal: { class: 'COMPENSABLE', compensation: 'deploy 42 again' },
-      deadline_sec: 60, idempotency_key,
+      deadline_sec: 60, idempotency_key, deadline_enforced_downstream: true,
     });
   };
   assert.equal(close(original).outcome, 'IN_DOUBT');
@@ -507,7 +508,7 @@ test('rule 7. the evidence chain holds plain data numbered from 1: the verifier 
 
 test('ACCEPTED is the human-review exit: it closes the obligation, not the outcome, and not the fence', () => {
   const { clock, authorize, start, step, close, claim, accept, engine } = setup();
-  const begun = start(authorize({ effect_key: 'deploy:site-a' }));
+  const begun = start(authorize({ effect_key: 'deploy:site-a' }), { deadline_enforced_downstream: true });
   step(begun, 'upload');
   // The executor closes with no proof, before its deadline: switch and purge-cache may still be in flight.
   assert.equal(close(begun).outcome, 'IN_DOUBT');
@@ -518,7 +519,7 @@ test('ACCEPTED is the human-review exit: it closes the obligation, not the outco
   assert.equal(accepted.effect.accepted_from, 'IN_DOUBT');
   assert.match(accepted.why, /outcome is still unknown/);
   assert.equal(accepted.record.payload.prior_state, 'IN_DOUBT');
-  assert.equal(accepted.key_fenced_until, begun.effect.deadline_at);
+  assert.deepEqual([accepted.key_fenced, accepted.key_fenced_until], [true, begun.effect.deadline_at]);
   // The obligation is closed: it is no longer listed as open. The outcome is not: it never reads COMMITTED.
   assert.equal(engine.listOpenEffects().open_count, 0);
   assert.notEqual(accepted.effect.state, 'COMMITTED');
@@ -561,4 +562,66 @@ test('the start is refused without what detection, ownership and reversal need, 
   });
   assert.equal(compAuth.decision, 'GRANTED');
   assert.equal(start(compAuth, { idempotency_key: 'deploy-42-other' }).reason_code, 'AUTHORIZATION_MISMATCH');
+});
+
+test('the deadline fences an attempt only when the downstream enforces it', () => {
+  const { clock, engine, grant, authorize, start, step, readBack, close, claim, accept } = setup();
+  assert.throws(() => start(authorize({ effect_key: 'deploy:x' }), { deadline_enforced_downstream: 'yes' }), /deadline_enforced_downstream/);
+
+  // Not enforced (the default): the clock proves nothing about a call in flight.
+  const loose = start(authorize({ effect_key: 'deploy:site-a' }));
+  assert.equal(loose.effect.deadline_enforced_downstream, false);
+  assert.equal(types(engine, 'EFFECT_STARTED')[0].payload.deadline_enforced_downstream, false, 'sealed in the start');
+  step(loose, 'upload');
+  clock.t += 601_000;
+  const reconciler = claim(loose);
+  const clockFence = close(reconciler, readBack({ fence: { kind: 'EXPIRED_UNUSED' } }));
+  assert.equal(clockFence.reason_code, 'FENCE_NOT_ENFORCED');
+  assert.equal(engine.listOpenEffects().open[0].state, 'IN_DOUBT', 'still IN_DOUBT, its key still fenced');
+  assert.equal(authorize({ effect_key: 'deploy:site-a' }).reason_code, 'EFFECT_OPEN');
+  // The downstream's own receipt still fences it.
+  const consumed = close(reconciler, readBack({ fence: { kind: 'CONSUMED_NOT_RELEASED', receipt_digest: digest('d') } }));
+  assert.equal(consumed.outcome, 'ABORTED');
+
+  // Not enforced and accepted: the key stays fenced past the deadline, for the rest of the run.
+  const accepted = start(authorize({ effect_key: 'deploy:site-b' }), { idempotency_key: 'deploy-b-1' });
+  step(accepted, 'upload');
+  clock.t += 601_000;
+  const kept = accept(accepted);
+  assert.deepEqual([kept.key_fenced, kept.key_fenced_until], [true, null]);
+  assert.match(kept.why, /rest of this run/);
+  clock.t += 6 * 60 * 60_000; // hours past its deadline (the grant itself lasts 24 hours)
+  const later = authorize({ effect_key: 'deploy:site-b' });
+  assert.deepEqual([later.reason_code, later.open_effect_id], ['EFFECT_OPEN', accepted.effect.effect_id]);
+  assert.match(later.reason, /not enforced downstream/);
+
+  // Not enforced, compensated: once the attempt stopped running a compensation may start, and its read-back of the
+  // earlier state ends the fence.
+  const undone = start(authorize({ effect_key: 'deploy:site-c' }), { idempotency_key: 'deploy-c-1' });
+  step(undone, 'upload');
+  assert.equal(close(undone).outcome, 'IN_DOUBT');
+  const compensation = (idempotency_key) => {
+    const auth = engine.authorize({
+      route_grant: grant, action: 'revert.deploy', consequence_tier: 'medium', principal: 'ops-lead',
+      effect_key: 'deploy:site-c', compensates_effect_id: undone.effect.effect_id,
+    });
+    return engine.compensateEffect({
+      effect_id: undone.effect.effect_id, authorization_record_hash: auth.record.record_hash, steps: ['restore-previous'],
+      postcondition: 'site-c serves release 41', reversal: { class: 'COMPENSABLE', compensation: 'deploy 42 again' },
+      deadline_sec: 60, idempotency_key,
+    });
+  };
+  assert.equal(compensation('revert-c-0').reason_code, 'ATTEMPT_NOT_FENCED', 'it is still running until its deadline');
+  clock.t += 601_000;
+  const comp = compensation('revert-c-1');
+  assert.equal(comp.status, 'STARTED');
+  step(comp, 'restore-previous');
+  assert.equal(close(comp, readBack({ postcondition_met: true, downstream_changed: true })).outcome, 'COMMITTED');
+  assert.equal(authorize({ effect_key: 'deploy:site-c' }).decision, 'GRANTED');
+
+  // Enforced: the deadline fences it (test 6 has both sides of that fence).
+  const strict = start(authorize({ effect_key: 'deploy:site-d' }), { idempotency_key: 'deploy-d-1', deadline_enforced_downstream: true });
+  step(strict, 'upload');
+  clock.t += 601_000;
+  assert.equal(close(claim(strict), readBack({ fence: { kind: 'EXPIRED_UNUSED' } })).outcome, 'ABORTED');
 });

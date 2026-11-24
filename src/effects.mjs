@@ -11,17 +11,19 @@
  * - COMMITTED: a read-back taken after the start shows the declared postcondition, and every step has an ok receipt.
  * - PARTIAL: a read-back shows the downstream changed without reaching the postcondition (or reached it without every
  *   step's receipt).
- * - ABORTED: a read-back shows nothing changed AND a fence shows the attempt can no longer land: its deadline has
- *   passed and the read-back was taken after it (EXPIRED_UNUSED), or the downstream's receipt says it took the attempt
- *   and will never apply it (CONSUMED_NOT_RELEASED). "Nothing seen" without a fence stays IN_DOUBT: a call that timed
- *   out may still land after the read, and a retry would then apply the effect twice.
+ * - ABORTED: a read-back shows nothing changed AND a fence shows the attempt can no longer land: the downstream's
+ *   receipt says it took the attempt and will never apply it (CONSUMED_NOT_RELEASED), or, only when the start said the
+ *   downstream refuses the attempt after its deadline (deadline_enforced_downstream), the deadline has passed and the
+ *   read-back was taken after it (EXPIRED_UNUSED). The clock alone proves nothing: a call already in flight to a
+ *   downstream that never saw the deadline can land after it. "Nothing seen" without a fence stays IN_DOUBT: a call
+ *   that timed out may still land after the read, and a retry would then apply the effect twice.
  *
  * Each start is one attempt with one lease (a token and a generation). Step receipts and closes carry the attempt
  * number and the lease token; a write from an older attempt, an expired lease or a replaced lease is refused, never
  * merged. The lease ends at the deadline by the clock: the sweep runs on every call and on a timer, with no call
  * needed from a holder that went quiet. An IN_DOUBT effect is reconciled under a new lease (arobi_claim_effect).
  * Retries and compensations are attempts of their own, numbered and capped, and start only under a grant that is
- * neither revoked nor expired. A compensation starts only once the effect it undoes can no longer land.
+ * neither revoked nor expired. A compensation starts only once the attempt it undoes has stopped running.
  *
  * ACCEPTED is the human-review exit: a person closes the obligation of an IN_DOUBT or PARTIAL effect. It never
  * changes the outcome (an accepted IN_DOUBT effect is still unknown) and never lifts the fence: the key stays fenced
@@ -111,14 +113,26 @@ export class EffectLedger {
     return timer;
   }
 
-  /**
-   * Whether this attempt could still land downstream: before its deadline, while a step has no ok receipt. An
-   * ABORTED attempt was fenced and never can.
-   */
-  mayStillLand(effect) {
-    if (effect.state === 'ABORTED' || this.now() >= Date.parse(effect.deadline_at)) return false;
+  /** Whether a step has no ok receipt: its call may not have returned, so it may still be in flight. */
+  unreceipted(effect) {
     const ok = new Set(effect.receipts.filter((r) => r.status === 'ok').map((r) => r.step));
     return effect.steps.some((s) => !ok.has(s));
+  }
+
+  /** Whether the attempt's own window is still open: before its deadline, with a step that has no ok receipt. */
+  attemptRunning(effect) {
+    return effect.state !== 'ABORTED' && this.now() < Date.parse(effect.deadline_at) && this.unreceipted(effect);
+  }
+
+  /**
+   * Whether this attempt could still land downstream. Never once it was fenced (ABORTED) or a compensation read back
+   * the earlier state (COMPENSATED), nor when every step has an ok receipt. Otherwise the deadline ends it only if
+   * the downstream enforces the deadline; if it does not, the clock proves nothing and it may land at any time.
+   */
+  mayStillLand(effect) {
+    if (effect.state === 'ABORTED' || effect.state === 'COMPENSATED' || !this.unreceipted(effect)) return false;
+    if (!effect.deadline_enforced_downstream) return true;
+    return this.now() < Date.parse(effect.deadline_at);
   }
 
   /**
@@ -131,9 +145,12 @@ export class EffectLedger {
   }
 
   blockingReason(effect, effectKey) {
-    return effect.state === 'ACCEPTED'
+    if (effect.state !== 'ACCEPTED') {
+      return `Effect ${effect.effect_id} on ${effectKey} is ${effect.state}; it must be closed, compensated or accepted before another effect on this key starts.`;
+    }
+    return effect.deadline_enforced_downstream
       ? `Effect ${effect.effect_id} on ${effectKey} was ACCEPTED as it stood, but its attempt can still land until ${effect.deadline_at}; another effect on this key waits until then.`
-      : `Effect ${effect.effect_id} on ${effectKey} is ${effect.state}; it must be closed, compensated or accepted before another effect on this key starts.`;
+      : `Effect ${effect.effect_id} on ${effectKey} was ACCEPTED as it stood, and its deadline is not enforced downstream, so it can still land at any time; this key stays fenced for the rest of this run.`;
   }
 
   openCompensationOf(effectId) {
@@ -233,6 +250,7 @@ export class EffectLedger {
     this.sweep();
     const {
       authorization_record_hash, effect_key, steps, postcondition, reversal, deadline_sec, cleanup_owner, idempotency_key,
+      deadline_enforced_downstream = false,
     } = args;
     if (!HEX_64.test(String(authorization_record_hash ?? ''))) {
       throw new Error('authorization_record_hash must be the record_hash of a GRANTED AUTHORIZATION this server sealed.');
@@ -289,6 +307,9 @@ export class EffectLedger {
     if (!(Number.isInteger(deadline_sec) && deadline_sec >= 1 && deadline_sec <= MAX_DEADLINE_SEC)) {
       throw new Error(`deadline_sec must be a whole number of seconds from 1 to ${MAX_DEADLINE_SEC}.`);
     }
+    if (typeof deadline_enforced_downstream !== 'boolean') {
+      throw new Error('deadline_enforced_downstream must be true (the downstream refuses this attempt after its deadline) or false (default).');
+    }
     // Attempts are numbered by the engine: a retry counts the attempts of its lineage, a compensation counts every
     // compensation of the effect it undoes. Both are capped, so recovery is bounded rather than a loop.
     const attempt = compensates
@@ -316,6 +337,9 @@ export class EffectLedger {
       postcondition,
       reversal: { class: reversal.class, ...(reversal.inverse ? { inverse: reversal.inverse } : {}), ...(reversal.compensation ? { compensation: reversal.compensation } : {}) },
       deadline_at: iso(nowMs + deadline_sec * 1000),
+      // Whether the downstream refuses this attempt after deadline_at: the executor carries the deadline to it as the
+      // call's own expiry. Only then does the deadline fence the attempt.
+      deadline_enforced_downstream,
       cleanup_owner: owner,
       ...(compensates ? { compensates } : {}),
     };
@@ -427,6 +451,9 @@ export class EffectLedger {
       }
       if (fence.kind === 'EXPIRED_UNUSED') {
         const deadlineMs = Date.parse(effect.deadline_at);
+        if (!effect.deadline_enforced_downstream) {
+          return this.refuse('FENCE_NOT_ENFORCED', `The start of ${effect_id} did not say the downstream refuses it after its deadline (deadline_enforced_downstream), so the deadline proves nothing: a call in flight may still land. Close it with the downstream's CONSUMED_NOT_RELEASED receipt, compensate it, or a person accepts it.`);
+        }
         if (nowMs < deadlineMs) {
           return this.refuse('FENCE_NOT_IN_FORCE', `This attempt can be used until its deadline ${effect.deadline_at}; until then a late call may still land, so nothing seen is IN_DOUBT, not ABORTED.`);
         }
@@ -553,8 +580,11 @@ export class EffectLedger {
     }
     const live = this.liveLease(original);
     if (live) return this.refuse('EFFECT_LEASED', `Effect ${original.effect_id} is held (${live.purpose}) until ${live.until}; one holder at a time.`);
-    if (this.mayStillLand(original)) {
-      return this.refuse('ATTEMPT_NOT_FENCED', `Effect ${original.effect_id} can still land until its deadline ${original.deadline_at} (a step without an ok receipt may be in flight); a compensation started now could be overtaken by a late landing.`);
+    // The compensation waits until the attempt's own window has closed (every step receipted ok, or its deadline
+    // passed). Where the downstream enforces the deadline nothing can land after that; where it does not, a call in
+    // flight still might, and the compensation's read-back is the evidence that the earlier state was restored.
+    if (this.attemptRunning(original)) {
+      return this.refuse('ATTEMPT_NOT_FENCED', `Effect ${original.effect_id} is still running until its deadline ${original.deadline_at} (a step without an ok receipt may be in flight); a compensation started now could be overtaken by a late landing.`);
     }
     const { effect_id: _original, ...start } = args;
     return this.begin({ ...start, effect_key: original.effect_key }, { compensates: original.effect_id });
@@ -594,11 +624,19 @@ export class EffectLedger {
     effect.closed_at = iso(this.now());
     // Accepting closes the obligation, never the outcome, and never the fence.
     const landable = this.mayStillLand(effect);
+    const until = effect.deadline_enforced_downstream ? effect.deadline_at : null;
+    let fence = '';
+    if (landable) {
+      fence = until
+        ? `, and the key stays fenced until ${until}, while the attempt can still land`
+        : ', and the key stays fenced for the rest of this run, because its deadline is not enforced downstream and the attempt can still land';
+    }
     return {
       status: 'ACCEPTED',
-      why: `accepted as it stood: the obligation is closed; the outcome ${prior === 'IN_DOUBT' ? 'is still unknown' : 'stays PARTIAL, with its receipts'}${landable ? `, and the key stays fenced until ${effect.deadline_at}, while the attempt can still land` : ''}`,
+      why: `accepted as it stood: the obligation is closed; the outcome ${prior === 'IN_DOUBT' ? 'is still unknown' : 'stays PARTIAL, with its receipts'}${fence}`,
       effect: this.view(effect),
-      ...(landable ? { key_fenced_until: effect.deadline_at } : {}),
+      key_fenced: landable,
+      key_fenced_until: landable ? until : null,
       mode: 'local',
       record,
     };
@@ -639,6 +677,7 @@ export class EffectLedger {
       reversal: { ...effect.reversal },
       started_at: effect.started_at,
       deadline_at: effect.deadline_at,
+      deadline_enforced_downstream: effect.deadline_enforced_downstream,
       cleanup_owner: effect.cleanup_owner,
       receipts: effect.receipts.map((r) => ({ ...r })),
       lease: effect.lease ? this.leaseView(effect.lease, false) : null,

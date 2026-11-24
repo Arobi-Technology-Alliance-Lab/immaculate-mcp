@@ -396,6 +396,7 @@ test('over MCP, the records of the sweep come back in also_sealed, and the recor
   const begun = rpc('arobi_begin_effect', {
     authorization_record_hash: auth.record.record_hash, steps: ['upload'], postcondition: 'site-a serves release 42',
     reversal: { class: 'COMPENSABLE', compensation: 'restore release 41' }, deadline_sec: 60, idempotency_key: 'deploy-42-mcp',
+    deadline_enforced_downstream: true,
   });
   assert.equal(typeof begun.lease.token, 'string');
   clock.t += 61_000;

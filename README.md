@@ -151,9 +151,13 @@ Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
     - **PARTIAL**: the read-back shows the downstream changed without reaching the postcondition, or reached it
       without every step's receipt.
     - **ABORTED** needs a read-back that shows nothing changed *and* a fence showing the attempt can no longer land:
-      - `EXPIRED_UNUSED`: its deadline has passed and the read-back was taken after it.
       - `CONSUMED_NOT_RELEASED`: the digest of the downstream's receipt that it took this attempt and will never
         apply it.
+      - `EXPIRED_UNUSED`: its deadline has passed and the read-back was taken after it. This counts only if the start
+        said `deadline_enforced_downstream: true`: the executor passes `deadline_at` to the downstream as the call's
+        own expiry, and the downstream refuses the attempt after it. Otherwise (the default) the clock proves nothing,
+        because a call already in flight to a downstream that never saw the deadline can land after it, and
+        `EXPIRED_UNUSED` is refused (`FENCE_NOT_ENFORCED`).
     - **IN_DOUBT** otherwise. "Nothing seen" before the fence is not "nothing happened": a call that timed out may
       still land after the read, and a retry would then apply the effect twice. Without a read-back, an exit status
       or an ok receipt is never an outcome.
@@ -172,8 +176,9 @@ Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
   - An IN_DOUBT effect is reconciled under a new lease from `arobi_claim_effect` (15 minutes, the next generation;
     one holder at a time; at most 5 claims, then a person decides). A reconciliation lease reads back and closes; it
     records no steps.
-  - Give the downstream the `effect_id` as this attempt's request id, and its deadline, so its own records and a
-    `CONSUMED_NOT_RELEASED` receipt name the attempt, and so it refuses the attempt after the deadline.
+  - Give the downstream the `effect_id` as this attempt's request id, so its own records and a
+    `CONSUMED_NOT_RELEASED` receipt name the attempt. Give it `deadline_at` as the call's expiry too, and say
+    `deadline_enforced_downstream: true`, only if it refuses the attempt after that.
   - A retry with the same `idempotency_key` replays the start, without the lease, instead of applying it twice. Only
     after that attempt closed ABORTED does the same key start the next attempt, at most 3. A step already recorded ok
     is not recorded again.
@@ -186,16 +191,19 @@ Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
   - A compensation is itself an authorized effect on the same key, with its own attempt number, lease and deadline.
     Authorize it with `compensates_effect_id`, the one authorization an open effect admits on its key. When the
     compensation's read-back shows the earlier state, the original becomes **COMPENSATED**.
-  - A compensation starts only once the original can no longer land (every step has an ok receipt, or its deadline
-    has passed), never while the original holds a live lease.
+  - A compensation starts only once the original has stopped running (every step has an ok receipt, or its
+    deadline has passed), never while the original holds a live lease. If the original's deadline is not enforced
+    downstream, a call of it still in flight may land after the compensation; the compensation's read-back is the
+    evidence that the earlier state was restored.
   - A compensation that does not settle is IN_DOUBT like any effect. No other compensation of the same effect starts
     until it is settled, and there are at most 3 per effect.
   - No effect or compensation starts under a grant that was revoked or has expired; work already in flight is still
-    recorded and read back.
+    recorded and read back. Revocation is the stop, and there is no resume: the local engine has no pause.
   - An IRREVERSIBLE effect cannot be compensated. A person may instead close an **IN_DOUBT** or **PARTIAL** effect as
     **ACCEPTED**, and that is sealed too.
   - Accepting closes the obligation, not the outcome. An accepted IN_DOUBT effect is still unknown, and a PARTIAL one
-    keeps its receipts. The key stays fenced while the accepted attempt can still land.
+    keeps its receipts. The key stays fenced while the accepted attempt can still land: until its deadline if the
+    downstream enforces it, otherwise for the rest of the run.
 - **The chain.**
   - Records are plain data (no functions, getters or class instances), numbered from 1 and hash-chained from
     `genesis`. `arobi_verify_chain` refuses a gap, a repeated (forked) record or a reordered sequence.
