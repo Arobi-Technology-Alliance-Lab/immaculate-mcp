@@ -10,6 +10,10 @@
  *   - arobi_revoke_grant       End a grant this server sealed before it expires & seal a ROUTE_REVOKE record
  *   - arobi_authorize          Evaluate an action against a route grant & seal AUTHORIZATION record
  *   - arobi_classify_and_route Pick the cheapest capable model or justify a quality exception
+ *   - arobi_record_route_outcome Teach learned escalation how a routed request turned out
+ *   - arobi_begin_effect, arobi_record_step, arobi_close_effect, arobi_claim_effect, arobi_list_open_effects,
+ *     arobi_compensate, arobi_accept_effect
+ *                              Partly-run actions: an authorized effect's life, from its start to a checked outcome
  *   - arobi_verify_chain       Re-derive SHA-256 hash-chain continuity & Ed25519 signatures
  */
 
@@ -29,7 +33,10 @@ const APPENDS_LOCAL_CHAIN = { readOnlyHint: false, destructiveHint: false, idemp
 const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
 
 const SERVER_INSTRUCTIONS =
-  'Arobi Immaculate MCP server. Seal authority with arobi_route_grant, end it early with arobi_revoke_grant, evaluate actions with arobi_authorize, choose policy-justified models with arobi_classify_and_route, and verify hash-chained records with arobi_verify_chain.';
+  'Arobi Immaculate MCP server. Seal authority with arobi_route_grant, end it early with arobi_revoke_grant, evaluate actions with arobi_authorize, choose policy-justified models with arobi_classify_and_route, and verify hash-chained records with arobi_verify_chain. For an action that changes something downstream, authorize it with an effect_key, start it with arobi_begin_effect, record each step with arobi_record_step and close it on a read-back with arobi_close_effect: unless a read-back proves otherwise it stays IN_DOUBT, and arobi_list_open_effects shows who owns it. Records that no call returned itself (the overdue sweep\'s) come back in also_sealed.';
+
+/** How often the overdue sweep runs between calls, so an effect whose executor went quiet reads IN_DOUBT on time. */
+const EFFECT_SWEEP_INTERVAL_MS = 10_000;
 
 export const TOOL_DEFINITIONS = [
   {
@@ -272,7 +279,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Start an authorized effect',
     annotations: { title: 'Start an authorized effect', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Start the effect a GRANTED authorization allows, and seal EFFECT_STARTED: its steps, the postcondition a read-back must show, how it is undone, a deadline and the cleanup owner (default: the grant\'s issuer). An effect not closed by its deadline reads IN_DOUBT on the next call, with no call needed from the executor. A retry with the same idempotency_key replays the start instead of applying it twice; a start on a key with an open effect is DENIED and names it.',
+      'Start the effect a GRANTED authorization allows, and seal EFFECT_STARTED: its steps, the postcondition a read-back must show, how it is undone, a deadline and the cleanup owner (default: the grant\'s issuer). Returns the effect (its attempt number and plan_digest) and a lease: pass attempt and lease.token with every step and the close, and give the downstream the effect_id as this attempt\'s request id. The lease ends at the deadline by the clock; an effect not closed by then reads IN_DOUBT, with no call needed from the executor. A retry with the same idempotency_key replays the start (without the lease) instead of applying it twice; only after that attempt closed ABORTED does the same key start the next attempt (at most 3). A start on a key with an open effect, or under a revoked or expired grant, is DENIED.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -292,8 +299,7 @@ export const TOOL_DEFINITIONS = [
         },
         deadline_sec: { type: 'integer', description: 'Seconds from now by which the effect is closed (1 to 604800); after that it reads IN_DOUBT.' },
         cleanup_owner: { type: 'string', description: 'Who cleans up if it is left part-done; default the grant\'s issuer.' },
-        idempotency_key: { type: 'string', description: 'Your key for this effect (8 to 200 characters); a retry with the same key replays the start.' },
-        attempt: { type: 'integer', description: 'The attempt number, from 1.' },
+        idempotency_key: { type: 'string', description: 'Your key for this effect (8 to 200 characters); a retry with the same key replays the start. Only its sha256 is sealed.' },
       },
       required: ['authorization_record_hash', 'steps', 'postcondition', 'reversal', 'deadline_sec', 'idempotency_key'],
     },
@@ -303,17 +309,19 @@ export const TOOL_DEFINITIONS = [
     title: 'Record one step of an effect',
     annotations: { title: 'Record one step of an effect', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Seal the receipt of one declared step of a started effect: ok or failed, with an optional digest of its evidence. A step already recorded ok is not recorded twice. A receipt after the deadline is marked late, and still says what landed.',
+      'Seal the receipt of one declared step of a started effect, under its lease: ok or failed, with an optional digest of its evidence. A step already recorded ok is not recorded twice. A receipt after the deadline is refused (the lease ended with it), and so is one that names an older attempt or a lease that was replaced.',
     inputSchema: {
       type: 'object',
       properties: {
         effect_id: { type: 'string', description: 'The effect arobi_begin_effect started.' },
+        attempt: { type: 'integer', description: 'The effect\'s attempt number, from its start.' },
+        lease_token: { type: 'string', description: 'The lease token arobi_begin_effect returned.' },
         step: { type: 'string', description: 'One of its declared steps.' },
         status: { type: 'string', enum: ['ok', 'failed'], description: 'How the step ended.' },
         evidence_digest: { type: 'string', description: 'Optional sha256 hex of the step\'s evidence.' },
         detail: { type: 'string', description: 'Optional note, up to 300 characters.' },
       },
-      required: ['effect_id', 'step', 'status'],
+      required: ['effect_id', 'attempt', 'lease_token', 'step', 'status'],
     },
   },
   {
@@ -321,24 +329,52 @@ export const TOOL_DEFINITIONS = [
     title: 'Close an effect on its read-back',
     annotations: { title: 'Close an effect on its read-back', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Close a started or IN_DOUBT effect and seal EFFECT_CLOSED. The outcome is decided here, not asserted: COMMITTED only when the read-back shows the postcondition and every step has an ok receipt; ABORTED when the read-back shows nothing changed (whatever the steps reported) or there is no read-back and no ok step; PARTIAL otherwise. A committed compensation also marks the effect it undoes COMPENSATED.',
+      'Settle an attempt on its read-back, under its lease. The outcome is decided here, not asserted, and IN_DOUBT is the default: with no read-back, or a read-back that shows nothing changed but no fence, the effect stays IN_DOUBT (open, owned, its key still fenced), because a call that timed out may still land. COMMITTED needs a read-back that shows the postcondition and an ok receipt for every step. ABORTED needs a read-back that shows nothing changed and a fence: EXPIRED_UNUSED (the deadline has passed and the read-back was taken after it) or CONSUMED_NOT_RELEASED (the downstream\'s receipt that it took this attempt and will never apply it). PARTIAL otherwise. A read-back counts only if it was taken after the start, not in the future and within the last 5 minutes, with an evidence digest. A committed compensation also marks the effect it undoes COMPENSATED.',
     inputSchema: {
       type: 'object',
       properties: {
         effect_id: { type: 'string', description: 'The effect to close.' },
+        attempt: { type: 'integer', description: 'The effect\'s attempt number, from its start.' },
+        lease_token: { type: 'string', description: 'The lease token from arobi_begin_effect, or from arobi_claim_effect for an IN_DOUBT effect.' },
         read_back: {
           type: 'object',
-          description: 'What you read back from the downstream system after the steps. Without it the effect is never COMMITTED.',
+          description: 'What you read back from the downstream system for this attempt. Without it what landed is unknown, and the effect stays IN_DOUBT.',
           properties: {
             postcondition_met: { type: 'boolean', description: 'Whether the downstream state shows the declared postcondition.' },
             downstream_changed: { type: 'boolean', description: 'Whether anything changed downstream at all.' },
-            evidence_digest: { type: 'string', description: 'Optional sha256 hex of what was read back.' },
+            observed_at: { type: 'string', description: 'When it was read back (ISO 8601): after the start, not in the future, at most 5 minutes ago.' },
+            evidence_digest: { type: 'string', description: 'sha256 hex of what was read back.' },
             detail: { type: 'string', description: 'Optional note, up to 300 characters.' },
+            fence: {
+              type: 'object',
+              description: 'Only with a read-back that shows nothing changed: why this attempt can no longer land.',
+              properties: {
+                kind: { type: 'string', enum: ['EXPIRED_UNUSED', 'CONSUMED_NOT_RELEASED'], description: 'EXPIRED_UNUSED: the deadline has passed and the read-back was taken after it. CONSUMED_NOT_RELEASED: the downstream took this attempt and will never apply it.' },
+                receipt_digest: { type: 'string', description: 'For CONSUMED_NOT_RELEASED: sha256 hex of the downstream\'s receipt saying so.' },
+              },
+              required: ['kind'],
+            },
           },
-          required: ['postcondition_met', 'downstream_changed'],
+          required: ['postcondition_met', 'downstream_changed', 'observed_at', 'evidence_digest'],
         },
       },
-      required: ['effect_id'],
+      required: ['effect_id', 'attempt', 'lease_token'],
+    },
+  },
+  {
+    name: 'arobi_claim_effect',
+    title: 'Claim an IN_DOUBT effect to reconcile it',
+    annotations: { title: 'Claim an IN_DOUBT effect to reconcile it', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'Take over an IN_DOUBT effect to read back its outcome: seals EFFECT_CLAIMED and returns a reconciliation lease (the next generation, for 15 minutes) to close it with arobi_close_effect. The earlier lease\'s writes are refused from then on. One holder at a time: refused while a lease is live or a compensation of the effect is open. At most 5 claims per effect; after that a person decides (arobi_accept_effect or arobi_compensate).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        effect_id: { type: 'string', description: 'The IN_DOUBT effect.' },
+        attempt: { type: 'integer', description: 'Its attempt number.' },
+        claimant: { type: 'string', description: 'Who reconciles it; default its cleanup owner.' },
+      },
+      required: ['effect_id', 'attempt'],
     },
   },
   {
@@ -346,7 +382,7 @@ export const TOOL_DEFINITIONS = [
     title: 'List open effects and their owners',
     annotations: { title: 'List open effects and their owners', ...APPENDS_LOCAL_CHAIN },
     description:
-      'List every effect still open in this run (started, IN_DOUBT or PARTIAL) with its cleanup owner, age, deadline and the receipts that landed. Listing first marks overdue effects IN_DOUBT, which seals a record, so this tool is not read-only.',
+      'List every effect still open in this run (started, IN_DOUBT or PARTIAL) with its cleanup owner, age, deadline, lease and the receipts that landed. Listing first marks overdue effects IN_DOUBT, which seals a record (returned in also_sealed), so this tool is not read-only.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -354,7 +390,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Start the compensation of an effect',
     annotations: { title: 'Start the compensation of an effect', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it and carried out under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. An IRREVERSIBLE effect cannot be compensated, only accepted.',
+      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it, with its own attempt number, lease and deadline, under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. It starts only once the original can no longer land (every step has an ok receipt, or its deadline has passed), never while the original is held by a lease, and never under a revoked or expired grant. A compensation that does not settle is IN_DOUBT like any effect, and no other compensation of the same effect starts until it is settled; at most 3 per effect. An IRREVERSIBLE effect cannot be compensated, only accepted.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -383,17 +419,18 @@ export const TOOL_DEFINITIONS = [
     title: 'Accept an effect as it stands',
     annotations: { title: 'Accept an effect as it stands', ...APPENDS_LOCAL_CHAIN },
     description:
-      'A person accepts an IN_DOUBT or PARTIAL effect as it stands instead of compensating it, and EFFECT_ACCEPTED is sealed with who they are, how they authenticated (within the last 300 s) and why.',
+      'A person accepts an IN_DOUBT or PARTIAL effect as it stands instead of compensating it, and EFFECT_ACCEPTED is sealed with who they are, how they authenticated (within the last 300 s) and why. Accepting closes the obligation, not the outcome: an IN_DOUBT effect stays unknown and a PARTIAL one keeps its receipts, and its key stays fenced until the attempt can no longer land. Refused while the effect is held by a lease or a compensation of it is open.',
     inputSchema: {
       type: 'object',
       properties: {
         effect_id: { type: 'string', description: 'The effect to accept.' },
+        attempt: { type: 'integer', description: 'Its attempt number.' },
         accepted_by: { type: 'string', description: 'The person accepting it.' },
         auth_method: { type: 'string', description: 'How they authenticated.' },
         auth_freshness_sec: { type: 'number', description: 'Age in seconds of that authentication (at most 300).' },
         reason: { type: 'string', description: 'Why it is accepted as it stands.' },
       },
-      required: ['effect_id', 'accepted_by', 'auth_method', 'auth_freshness_sec', 'reason'],
+      required: ['effect_id', 'attempt', 'accepted_by', 'auth_method', 'auth_freshness_sec', 'reason'],
     },
   },
   {
@@ -401,7 +438,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Verify a sealed record chain',
     annotations: { title: 'Verify a sealed record chain', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      'Recompute a set of sealed records locally and report whether they form one unbroken SHA-256 hash chain signed by one Ed25519 key, pinpointing the first broken record index and the reason. Pass expected_signer_kid to check who signed it: without it, a chain re-sealed with another key also passes. Unsigned records fail unless allow_unsigned is true.',
+      'Recompute a set of sealed records locally and report whether they form one unbroken SHA-256 hash chain of plain data signed by one Ed25519 key, numbered from 1 with no gap, repeat or reordering, pinpointing the first broken record index and the reason. Pass expected_signer_kid to check who signed it: without it, a chain re-sealed with another key also passes. Unsigned records fail unless allow_unsigned is true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -431,7 +468,15 @@ function writeMessage(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-function handleToolCall(name, args) {
+function handleToolCall(name, args, target) {
+  const result = callTool(name, args, target);
+  // Records the overdue sweep sealed (between calls, or inside this one) come back with this result, so a client
+  // that keeps the records it is given holds the whole chain.
+  const swept = target.effects.takeUnreturned();
+  return swept.length > 0 ? { ...result, also_sealed: swept } : result;
+}
+
+function callTool(name, args, engine) {
   switch (name) {
     case 'arobi_route_grant':
       return engine.routeGrant(args);
@@ -449,6 +494,8 @@ function handleToolCall(name, args) {
       return engine.recordEffectStep(args);
     case 'arobi_close_effect':
       return engine.closeEffect(args);
+    case 'arobi_claim_effect':
+      return engine.claimEffect(args);
     case 'arobi_list_open_effects':
       return engine.listOpenEffects();
     case 'arobi_compensate':
@@ -462,7 +509,8 @@ function handleToolCall(name, args) {
   }
 }
 
-export function handleJsonRpc(msg) {
+// The server's own engine answers unless another is passed (the tests pass one with their own clock).
+export function handleJsonRpc(msg, target = engine) {
   if (!msg || typeof msg !== 'object') {
     return {
       jsonrpc: '2.0',
@@ -526,7 +574,7 @@ export function handleJsonRpc(msg) {
       const toolName = msg.params?.name;
       const toolArgs = msg.params?.arguments ?? {};
       try {
-        const result = handleToolCall(toolName, toolArgs);
+        const result = handleToolCall(toolName, toolArgs, target);
         return {
           jsonrpc: '2.0',
           id: msg.id,
@@ -560,6 +608,7 @@ export function handleJsonRpc(msg) {
 }
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
+  engine.effects.startSweepTimer(EFFECT_SWEEP_INTERVAL_MS);
   const rl = readline.createInterface({
     input: process.stdin,
     crlfDelay: Infinity,

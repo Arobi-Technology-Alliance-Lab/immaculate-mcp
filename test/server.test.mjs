@@ -12,7 +12,7 @@ function call(id, name, args) {
   return handleJsonRpc({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }).result;
 }
 
-test('MCP initialize, ping, and tools/list return all 12 tools', () => {
+test('MCP initialize, ping, and tools/list return all 13 tools', () => {
   const init = handleJsonRpc({
     jsonrpc: '2.0',
     id: 1,
@@ -35,6 +35,7 @@ test('MCP initialize, ping, and tools/list return all 12 tools', () => {
     'arobi_begin_effect',
     'arobi_record_step',
     'arobi_close_effect',
+    'arobi_claim_effect',
     'arobi_list_open_effects',
     'arobi_compensate',
     'arobi_accept_effect',
@@ -293,7 +294,7 @@ test('every tool is titled and annotated, and every parameter is described', () 
   const readOnly = Object.fromEntries(list.result.tools.map((tool) => [tool.name, tool.annotations.readOnlyHint]));
   assert.deepEqual(readOnly, {
     arobi_route_grant: false, arobi_revoke_grant: false, arobi_authorize: false, arobi_classify_and_route: false, arobi_record_route_outcome: false,
-    arobi_begin_effect: false, arobi_record_step: false, arobi_close_effect: false, arobi_list_open_effects: false, arobi_compensate: false, arobi_accept_effect: false,
+    arobi_begin_effect: false, arobi_record_step: false, arobi_close_effect: false, arobi_claim_effect: false, arobi_list_open_effects: false, arobi_compensate: false, arobi_accept_effect: false,
     arobi_verify_chain: true,
   });
   const destructive = list.result.tools.filter((tool) => tool.annotations.destructiveHint).map((tool) => tool.name);
@@ -375,4 +376,42 @@ test('arobi_revoke_grant over MCP: REVOKED, then the grant is DENIED', () => {
   const text = JSON.parse(denied.content[0].text);
   assert.equal(text.record.payload.revoke_id, revoked.structuredContent.route_revoke.revoke_id);
   assert.equal(text.record.prev_hash, revoked.structuredContent.record.record_hash);
+});
+
+// Partly-run actions over MCP (2026-11-24): a record the overdue sweep sealed is returned with the next result, so the
+// records a client was given are the whole chain; no lease token or idempotency key is ever sealed.
+test('over MCP, the records of the sweep come back in also_sealed, and the records a client was given verify as one chain', () => {
+  const clock = { t: Date.parse('2026-11-24T12:00:00.000Z') };
+  const engine = new LocalImmaculateEngine({ now: () => clock.t });
+  const kept = [];
+  const rpc = (name, args) => {
+    const result = handleJsonRpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, engine).result;
+    assert.equal(result.isError, false, result.content[0].text);
+    const out = result.structuredContent;
+    for (const record of [...(out.also_sealed ?? []), out.record, out.compensated_record]) if (record) kept.push(record);
+    return out;
+  };
+  const grant = rpc('arobi_route_grant', { route_id: 'ops', scope: { actions: ['deploy.*'] }, granted_by: 'ops-lead', delegated_to: 'agent' }).route_grant;
+  const auth = rpc('arobi_authorize', { route_grant: grant, action: 'deploy.release', consequence_tier: 'medium', principal: 'agent', effect_key: 'deploy:site-a' });
+  const begun = rpc('arobi_begin_effect', {
+    authorization_record_hash: auth.record.record_hash, steps: ['upload'], postcondition: 'site-a serves release 42',
+    reversal: { class: 'COMPENSABLE', compensation: 'restore release 41' }, deadline_sec: 60, idempotency_key: 'deploy-42-mcp',
+  });
+  assert.equal(typeof begun.lease.token, 'string');
+  clock.t += 61_000;
+  // The next call, whichever it is, carries the record of the sweep that marked the effect IN_DOUBT.
+  const listed = rpc('arobi_list_open_effects', {});
+  assert.equal(listed.open[0].state, 'IN_DOUBT');
+  assert.deepEqual(listed.also_sealed.map((r) => r.record_type), ['EFFECT_IN_DOUBT']);
+  const claimed = rpc('arobi_claim_effect', { effect_id: begun.effect.effect_id, attempt: 1 });
+  const closed = rpc('arobi_close_effect', {
+    effect_id: begun.effect.effect_id, attempt: 1, lease_token: claimed.lease.token,
+    read_back: { postcondition_met: false, downstream_changed: false, observed_at: new Date(clock.t).toISOString(), evidence_digest: 'e'.repeat(64), fence: { kind: 'EXPIRED_UNUSED' } },
+  });
+  assert.equal(closed.outcome, 'ABORTED');
+  assert.deepEqual(kept.map((r) => r.seq), engine.chain.map((r) => r.seq), 'the client holds every record, in order');
+  const verified = rpc('arobi_verify_chain', { records: kept, expected_signer_kid: engine.signerKid });
+  assert.equal(verified.valid, true, verified.reason);
+  const sealed = JSON.stringify(engine.chain);
+  for (const secret of [begun.lease.token, claimed.lease.token, 'deploy-42-mcp']) assert.ok(!sealed.includes(secret));
 });

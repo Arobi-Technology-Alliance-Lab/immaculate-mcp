@@ -28,13 +28,14 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 | `arobi_authorize` | Verifies that the grant was sealed by this server and not revoked (an unsigned grant, one signed with any other key, or a revoked one is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
 | `arobi_classify_and_route` | Classifies prompt complexity, filters capable candidates, picks the lowest-cost capable model or applies an explicit `quality_exception` uplift rule, detects repeated work, and optionally seals a `ROUTING_DECISION` record. With `escalation` set, it pays for a dearer capable candidate only when the predicted chance it beats the cheapest capable one **on this request** reaches your cost threshold (learned escalation, below). |
 | `arobi_record_route_outcome` | Teaches learned escalation: records how a routed request turned out (`quality` 0 to 1, or `ok`) and, optionally, how it compared with another candidate on the same request. Seals a hash-chained `ROUTE_OUTCOME` record and returns the run's routing stats (escalated share, mean quality per candidate). |
-| `arobi_begin_effect` | Starts the effect a **GRANTED** authorization allows and seals `EFFECT_STARTED`. It names the steps, the postcondition a read-back must show, how the effect is undone, a deadline and the cleanup owner (partly-run actions, below). |
-| `arobi_record_step` | Seals the receipt of one declared step: ok or failed, with an optional evidence digest. |
-| `arobi_close_effect` | Closes an effect on its read-back and seals `EFFECT_CLOSED`. The engine decides the outcome: **COMMITTED**, **ABORTED** or **PARTIAL**. |
-| `arobi_list_open_effects` | Lists every open effect (started, **IN_DOUBT** or **PARTIAL**) with its owner, age, deadline and the receipts that landed. |
-| `arobi_compensate` | Starts the compensation of an effect: an authorized effect of its own, linked to the one it undoes. |
+| `arobi_begin_effect` | Starts the effect a **GRANTED** authorization allows and seals `EFFECT_STARTED`. It names the steps, the postcondition a read-back must show, how the effect is undone, a deadline and the cleanup owner, and it returns the attempt number and a lease (partly-run actions, below). |
+| `arobi_record_step` | Seals the receipt of one declared step under the attempt's lease: ok or failed, with an optional evidence digest. |
+| `arobi_close_effect` | Settles an attempt on its read-back. The engine decides the outcome: **COMMITTED**, **ABORTED** or **PARTIAL** on evidence, **IN_DOUBT** without it. |
+| `arobi_claim_effect` | Takes over an **IN_DOUBT** effect under a new lease, to read back its outcome and close it. |
+| `arobi_list_open_effects` | Lists every open effect (started, **IN_DOUBT** or **PARTIAL**) with its owner, age, deadline, lease and the receipts that landed. |
+| `arobi_compensate` | Starts the compensation of an effect: an authorized effect of its own, linked to the one it undoes, with its own attempt number and lease. |
 | `arobi_accept_effect` | A person accepts an **IN_DOUBT** or **PARTIAL** effect as it stands, and `EFFECT_ACCEPTED` is sealed. |
-| `arobi_verify_chain` | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
+| `arobi_verify_chain` | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, checks that they are plain data numbered from 1 with no gap, repeat or reordering, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
 
 ### Learned escalation (after RouteLLM)
 
@@ -133,40 +134,81 @@ dearer one, following RouteLLM (Ong et al., *RouteLLM: Learning to Route LLMs wi
 chain, so an action that only partly ran is detected, has an owner and can be reversed:
 
 ```
-AUTHORIZED -> STARTED -> (step receipts) -> CLOSED: COMMITTED | ABORTED | PARTIAL
-                 |                                        |
-                 +-- deadline passes, no close -> IN_DOUBT +--> COMPENSATED | ACCEPTED
+AUTHORIZED -> STARTED -> (step receipts) -> COMMITTED | ABORTED | PARTIAL, or IN_DOUBT
+                 |                                                      |
+                 +-- deadline passes, no close -> IN_DOUBT              +--> COMPENSATED | ACCEPTED
 ```
 
+**IN_DOUBT is the default.** An effect is COMMITTED, ABORTED or PARTIAL only on a read-back bound to its attempt.
+Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
+
 - **Detect.**
-  - Every start names a deadline. An effect still open after it reads **IN_DOUBT** on the next call to the engine,
-    with no call from the executor. The transition is sealed once.
+  - Every start names a deadline. An effect still open after it reads **IN_DOUBT** with no call from the executor.
+    The sweep runs on every call and every 10 seconds on the server's timer, and the transition is sealed once.
   - Each step leaves its own receipt.
-  - A close is checked, not asserted. **COMMITTED** needs a read-back that shows the declared postcondition and an ok
-    receipt for every step. A run whose read-back shows nothing changed closes **ABORTED**, whatever its steps
-    reported. Without a read-back the effect is never COMMITTED.
+  - A close is checked, not asserted:
+    - **COMMITTED** needs a read-back that shows the declared postcondition and an ok receipt for every step.
+    - **PARTIAL**: the read-back shows the downstream changed without reaching the postcondition, or reached it
+      without every step's receipt.
+    - **ABORTED** needs a read-back that shows nothing changed *and* a fence showing the attempt can no longer land:
+      - `EXPIRED_UNUSED`: its deadline has passed and the read-back was taken after it.
+      - `CONSUMED_NOT_RELEASED`: the digest of the downstream's receipt that it took this attempt and will never
+        apply it.
+    - **IN_DOUBT** otherwise. "Nothing seen" before the fence is not "nothing happened": a call that timed out may
+      still land after the read, and a retry would then apply the effect twice. Without a read-back, an exit status
+      or an ok receipt is never an outcome.
+  - A read-back counts only if it was taken after the attempt started, not in the future, at most 5 minutes ago, and
+    with an evidence digest. The close names the attempt, and the sealed close names the plan digest the start fixed.
 - **Own.**
   - The start names the cleanup owner; by default that is the grant's issuer.
   - `arobi_list_open_effects` lists the obligations.
   - While an effect on a key is open, `arobi_authorize` with that `effect_key`, or a new start on it, is **DENIED**
     (`EFFECT_OPEN`) and names the open effect.
-  - A retry with the same `idempotency_key` replays the start instead of applying it twice. A step already recorded ok
+- **Attempts and leases.**
+  - Each start is one attempt, numbered by the engine, with a lease: a token, a generation, and an end at the
+    deadline. Every step receipt and close carries the attempt number and the lease token.
+  - A write from an older attempt, under an expired lease or under a replaced lease is refused, never merged. After
+    the deadline the executor records nothing more.
+  - An IN_DOUBT effect is reconciled under a new lease from `arobi_claim_effect` (15 minutes, the next generation;
+    one holder at a time; at most 5 claims, then a person decides). A reconciliation lease reads back and closes; it
+    records no steps.
+  - Give the downstream the `effect_id` as this attempt's request id, and its deadline, so its own records and a
+    `CONSUMED_NOT_RELEASED` receipt name the attempt, and so it refuses the attempt after the deadline.
+  - A retry with the same `idempotency_key` replays the start, without the lease, instead of applying it twice. Only
+    after that attempt closed ABORTED does the same key start the next attempt, at most 3. A step already recorded ok
     is not recorded again.
 - **Reverse.**
   - A start declares `REVERSIBLE` (naming the inverse), `COMPENSABLE` (naming the compensating action) or
     `IRREVERSIBLE`.
   - `arobi_authorize` with `reversal_class: IRREVERSIBLE` is DENIED unless `human_approval` names a person who
-    approved it in the last 15 minutes. That is decided before the effect starts, not discovered afterwards.
-  - A compensation is itself an authorized effect on the same key. Authorize it with `compensates_effect_id`, the one
-    authorization an open effect admits on its key. When the compensation's read-back shows the earlier state, the
-    original becomes **COMPENSATED**.
+    approved it in the last 15 minutes. That is decided before the effect starts, and a held authorization starts
+    nothing.
+  - A compensation is itself an authorized effect on the same key, with its own attempt number, lease and deadline.
+    Authorize it with `compensates_effect_id`, the one authorization an open effect admits on its key. When the
+    compensation's read-back shows the earlier state, the original becomes **COMPENSATED**.
+  - A compensation starts only once the original can no longer land (every step has an ok receipt, or its deadline
+    has passed), never while the original holds a live lease.
+  - A compensation that does not settle is IN_DOUBT like any effect. No other compensation of the same effect starts
+    until it is settled, and there are at most 3 per effect.
+  - No effect or compensation starts under a grant that was revoked or has expired; work already in flight is still
+    recorded and read back.
   - An IRREVERSIBLE effect cannot be compensated. A person may instead close an **IN_DOUBT** or **PARTIAL** effect as
     **ACCEPTED**, and that is sealed too.
-- **What the local engine can and cannot know.** It does not observe the downstream system. The read-backs and the
-  human approval are what the caller reports. The engine checks that they were reported, that they agree with what
-  the start declared, and seals them, so a later reader sees exactly what was claimed and when. For approvals and
-  read-backs checked by someone other than the agent's operator, use the hosted service once it has these tools; it
-  does not yet.
+  - Accepting closes the obligation, not the outcome. An accepted IN_DOUBT effect is still unknown, and a PARTIAL one
+    keeps its receipts. The key stays fenced while the accepted attempt can still land.
+- **The chain.**
+  - Records are plain data (no functions, getters or class instances), numbered from 1 and hash-chained from
+    `genesis`. `arobi_verify_chain` refuses a gap, a repeated (forked) record or a reordered sequence.
+  - Records that no call returned itself (the overdue sweep's) come back in `also_sealed` with the next result, so a
+    client that keeps what it is given holds the whole chain.
+  - Lease tokens are never sealed. The idempotency key is sealed only as its sha256.
+- **What the local engine can and cannot know.**
+  - It does not observe the downstream system. The read-backs, fences and human approvals are what the caller
+    reports.
+  - The engine checks that they were reported, that they are bound to the attempt and agree with what the start
+    declared, and seals them, so a later reader sees exactly what was claimed and when.
+  - For approvals and read-backs checked by someone other than the agent's operator, use the hosted service once it
+    has these tools; it does not yet.
 
 ### The local engine and the hosted service
 
