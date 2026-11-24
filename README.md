@@ -55,6 +55,12 @@ dearer one, following RouteLLM (Ong et al., *RouteLLM: Learning to Route LLMs wi
   - It only adds escalation: it never undoes an explicit `quality_exception`.
   - Every decision records the probability, its source, the threshold and its source in the sealed
     `ROUTING_DECISION`.
+- **Scope.** Give `escalation.scope`, a short lowercase label for the population a request belongs to (a product
+  surface, a workflow, a subject; for example `support:refunds`), and the estimate uses only the evidence recorded
+  under that scope. Outcomes recorded for a scoped decision teach only that scope, `preference_history` items can
+  carry their `scope`, and `target_strong_rate` calibrates each scope on its own past estimates. A scope with no
+  evidence yet answers with the stated prior, never with another scope's evidence. Without a scope, evidence pools as
+  in 1.3.0. A scope is a label you choose, never personal data.
 - **No prompt text kept.** A request becomes eight content-free numbers: length, code, math, deep-reasoning and
   task markers, structured output, several questions, and non-ASCII text. Only those numbers and the outcomes are
   remembered. The prompt itself is only hashed, as before.
@@ -66,19 +72,20 @@ dearer one, following RouteLLM (Ong et al., *RouteLLM: Learning to Route LLMs wi
   | --- | --- | --- | --- |
   | Random | 0.500 | 50.0% | 0.500 |
   | Learned, eight features, all evidence | 0.496 | 50.6% | 0.503 |
-  | Learned, evidence from the same MMLU subject | 0.677 | 26.2% | 0.503 |
+  | Learned, `escalation.scope` = the MMLU subject | 0.677 | 26.2% | 0.503 |
   | Oracle (upper bound) | 1.285 | 6.3% | 1.125 |
 
   The eight content-free features alone carry almost no signal on these benchmarks: pooled evidence routes no better
   than chance. Evidence scoped to a meaningful domain does: within an MMLU subject, half the quality gap comes back
-  with 26% of requests on the dearer model instead of 50%. So keep outcomes per domain, and pass each domain its own
-  `preference_history`, rather than pooling everything. These are in-distribution results. RouteLLM's own tables test
+  with 26% of requests on the dearer model instead of 50%. So give each domain its own `escalation.scope` rather than
+  pooling everything. These are in-distribution results. RouteLLM's own tables test
   out of distribution, so the numbers are not directly comparable. `bench/route-escalation/results.json` has every
   router and metric.
-- **Scope.** The evidence lasts for the run, like the signing key. To carry it across runs, keep the `features` each
-  answer returns together with your outcomes, and pass them back as `preference_history`. Quality judgments are
+- **Across runs.** The evidence lasts for the run, like the signing key. To carry it across runs, keep the `features`
+  each answer returns (and the request's `scope`) together with your outcomes, and pass them back as
+  `preference_history`. Quality judgments are
   yours: the engine learns from what you record and makes no model calls of its own. Without `escalation`, routing
-  and the sealed records are exactly as in 1.2.0.
+  and the sealed records are exactly as in 1.2.0, and an unscoped escalation is exactly as in 1.3.0.
 
 ### The local engine and the hosted service
 

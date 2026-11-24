@@ -9,7 +9,8 @@
 
 import crypto from 'node:crypto';
 import {
-  complexityOf, evidenceFromHistory, FEATURE_NAMES, routeFeatures, thresholdForStrongRate, winProbability,
+  complexityOf, evidenceFromHistory, evidenceInScope, FEATURE_NAMES, isScopeLabel, routeFeatures, thresholdForStrongRate,
+  winProbability,
 } from './route-learning.mjs';
 
 // How much routing evidence one run keeps (oldest dropped first): win probabilities for calibration, outcomes and
@@ -73,7 +74,8 @@ export class LocalImmaculateEngine {
     // of the old run's grants anyway.
     this.revocations = new Map();
     // Learned escalation (RouteLLM-style): content-free evidence, the run's past win probabilities for threshold
-    // calibration, and the recorded routing decisions an outcome can refer to. Like the key, these last for the run.
+    // calibration ({ scope, p }, so each scope calibrates on its own), and the recorded routing decisions an outcome
+    // can refer to. Like the key, these last for the run.
     this.routeEvidence = [];
     this.winScores = [];
     this.routeDecisions = new Map();
@@ -518,16 +520,26 @@ export class LocalImmaculateEngine {
     // answer beats the cheapest capable one on THIS request clears the cost threshold (RouteLLM, Eq. 2). The capability
     // floor and max_premium_usd still bound it, and it can only escalate, never undo an explicit quality_exception.
     let escalationResult;
+    let escalationScope;
     const escalation = args.escalation;
     if (escalation !== undefined) {
       if (!escalation || typeof escalation !== 'object') throw new Error('escalation must be an object.');
-      const { cost_threshold, target_strong_rate, strong_candidate, max_premium_usd } = escalation;
+      const { cost_threshold, target_strong_rate, strong_candidate, max_premium_usd, scope } = escalation;
       if (cost_threshold !== undefined && !(typeof cost_threshold === 'number' && cost_threshold >= 0 && cost_threshold <= 1)) {
         throw new Error('escalation.cost_threshold must be a number from 0 to 1.');
       }
       if (target_strong_rate !== undefined && !(typeof target_strong_rate === 'number' && target_strong_rate >= 0 && target_strong_rate <= 1)) {
         throw new Error('escalation.target_strong_rate must be a number from 0 to 1.');
       }
+      if (scope !== undefined && !isScopeLabel(scope)) {
+        throw new Error('escalation.scope must be a lowercase label of 1 to 64 characters (a-z, 0-9, . _ : / -), starting with a letter or digit.');
+      }
+      // The trade-off is the caller's to state. P = 0.5 + (expected quality gain) / 2, so any threshold near 0.5 buys
+      // the premium whenever the dearer candidate is better at all, which on public benchmarks is 83-100% of requests.
+      if (cost_threshold === undefined && target_strong_rate === undefined) {
+        throw new Error('escalation needs cost_threshold or target_strong_rate: P = 0.5 + (expected quality gain) / 2, so cost_threshold 0.6 escalates only when the dearer candidate is expected to score 20 points higher on requests like this one, and target_strong_rate 0.2 escalates about a fifth of requests.');
+      }
+      escalationScope = scope;
       const premiumCap = max_premium_usd !== undefined ? Number(max_premium_usd) : Infinity;
       const dearer = capable.filter((c) => c !== cheapest && c.total_unit_cost_usd - cheapest.total_unit_cost_usd <= premiumCap);
       let strong = null;
@@ -538,36 +550,41 @@ export class LocalImmaculateEngine {
         strong = [...dearer].sort((a, b) => ((b.observed_success_rate ?? -1) - (a.observed_success_rate ?? -1))
           || (b.total_unit_cost_usd - a.total_unit_cost_usd))[0];
       }
+      // Present in the result (and so in the sealed record) only when given, so unscoped records are as before.
+      const scoped = scope === undefined ? {} : { scope };
       if (!strong) {
         escalationResult = {
           escalated: false,
+          ...scoped,
           reason: strong_candidate !== undefined
             ? `strong_candidate ${strong_candidate} is not a capable candidate within the premium cap.`
             : 'No dearer capable candidate within the premium cap.',
         };
       } else {
-        const evidence = [...this.routeEvidence, ...evidenceFromHistory(args.preference_history)];
+        // With a scope, only evidence recorded under that scope counts: the run's own and the caller's history.
+        const evidence = evidenceInScope([...this.routeEvidence, ...evidenceFromHistory(args.preference_history)], scope);
         const win = winProbability({ features, weakId: cheapest.id, strongId: strong.id, evidence, complexity });
         let threshold = cost_threshold;
         let thresholdSource = 'cost_threshold';
-        if (threshold === undefined && target_strong_rate !== undefined) {
-          const calibrated = thresholdForStrongRate(this.winScores, target_strong_rate);
-          threshold = calibrated ?? 0.5;
-          thresholdSource = calibrated === null ? 'default_until_20_scores' : 'calibrated_to_target_strong_rate';
-        }
         if (threshold === undefined) {
-          threshold = 0.5;
-          thresholdSource = 'default';
+          // Calibrated from this scope's past estimates; until there are 20 there is no threshold to guess, so
+          // nothing is escalated (a guessed 0.5 would escalate almost everything).
+          const pastScores = this.winScores.filter((s) => s.scope === scope).map((s) => s.p);
+          const calibrated = thresholdForStrongRate(pastScores, target_strong_rate);
+          threshold = calibrated;
+          thresholdSource = calibrated === null ? 'calibrating_until_20_scores' : 'calibrated_to_target_strong_rate';
         }
-        this.remember(this.winScores, win.p);
-        const escalate = win.p >= threshold && selected !== strong;
+        // Calibration takes only estimates that rested on evidence: the prior is a constant per complexity.
+        if (win.source !== 'complexity_prior') this.remember(this.winScores, { scope, p: win.p });
+        const escalate = threshold !== null && win.p >= threshold && selected !== strong;
         if (escalate) {
           selected = strong;
           justificationType = 'learned_escalation';
-          justification = `Escalated to ${strong.id}: P(it beats ${cheapest.id} on this request) = ${win.p} >= cost threshold ${threshold} (${win.source}).`;
+          justification = `Escalated to ${strong.id}: P(it beats ${cheapest.id} on this request) = ${win.p} >= cost threshold ${threshold} (${win.source}${scope === undefined ? '' : `, scope ${scope}`}).`;
         }
         escalationResult = {
           escalated: escalate,
+          ...scoped,
           strong_id: strong.id,
           win_probability: win.p,
           win_probability_source: win.source,
@@ -598,7 +615,7 @@ export class LocalImmaculateEngine {
       this.seenPrompts.set(promptHash, { selected_id: selected.id, record_hash: sealed.record_hash });
       this.routeDecisions.set(sealed.record_hash, {
         features, cheapest_id: cheapest.id, selected_id: selected.id, escalated: Boolean(escalationResult?.escalated),
-        candidate_ids: capable.map((c) => c.id),
+        candidate_ids: capable.map((c) => c.id), scope: escalationScope,
       });
       if (this.routeDecisions.size > ROUTE_MEMORY) this.routeDecisions.delete(this.routeDecisions.keys().next().value);
     }
@@ -656,8 +673,10 @@ export class LocalImmaculateEngine {
         ? { kind: 'pair', features: decision.features, a: candidateId, b: other, tie: true }
         : { kind: 'pair', features: decision.features, a: result === 'win' ? candidateId : other, b: result === 'win' ? other : candidateId, tie: false };
     }
-    this.remember(this.routeEvidence, { kind: 'outcome', features: decision.features, candidate_id: candidateId, quality: q });
-    if (pair) this.remember(this.routeEvidence, pair);
+    // Evidence keeps the scope its decision was routed under, so it teaches only that scope's later requests.
+    const scoped = decision.scope === undefined ? {} : { scope: decision.scope };
+    this.remember(this.routeEvidence, { kind: 'outcome', features: decision.features, candidate_id: candidateId, quality: q, ...scoped });
+    if (pair) this.remember(this.routeEvidence, { ...pair, ...scoped });
     const sealed = shouldRecord
       ? this.sealRecord('ROUTE_OUTCOME', {
         routing_record_hash,

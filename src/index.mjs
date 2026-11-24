@@ -19,7 +19,7 @@ import { LocalImmaculateEngine } from './engine.mjs';
 const SERVER_INFO = {
   name: 'arobi-immaculate-mcp',
   title: 'Arobi Immaculate MCP (local engine)',
-  version: '1.3.0',
+  version: '1.4.0',
 };
 
 // What each tool does to this server's local chain, for MCP clients that decide by it (behaviour annotations). The
@@ -137,7 +137,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Choose the cheapest capable route',
     annotations: { title: 'Choose the cheapest capable route', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Classify a prompt and choose the cheapest route capable of the work from your candidate set, reporting whether any cost above the cheapest capable route is justified by required_capabilities, an explicit quality_exception policy, or learned escalation. With escalation set, a dearer capable candidate is chosen only when the predicted chance it beats the cheapest capable one on this request (similarity-weighted over recorded outcomes, after RouteLLM) reaches the cost threshold. No prompt text is kept: the request becomes eight content-free numbers. Set record=false to preview without appending to the local chain.',
+      'Classify a prompt and choose the cheapest route capable of the work from your candidate set, reporting whether any cost above the cheapest capable route is justified by required_capabilities, an explicit quality_exception policy, or learned escalation. With escalation set, a dearer capable candidate is chosen only when the predicted chance it beats the cheapest capable one on this request (similarity-weighted over recorded outcomes, after RouteLLM) reaches the cost threshold; escalation needs cost_threshold or target_strong_rate, and with escalation.scope only evidence recorded under the same scope counts. No prompt text is kept: the request becomes sixteen content-free numbers. Set record=false to preview without appending to the local chain.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -177,30 +177,36 @@ export const TOOL_DEFINITIONS = [
         escalation: {
           type: 'object',
           description:
-            'Optional learned escalation. Escalate from the cheapest capable candidate to a dearer one only when P(the dearer one wins on this request) >= the cost threshold. It never picks an incapable candidate and never undoes quality_exception.',
+            'Optional learned escalation. Escalate from the cheapest capable candidate to a dearer one only when P(the dearer one wins on this request) >= the cost threshold. Give cost_threshold or target_strong_rate (one is required): P = 0.5 + (expected quality gain) / 2, so a threshold near 0.5 would escalate whenever the dearer one is better at all. It never picks an incapable candidate and never undoes quality_exception.',
           properties: {
-            cost_threshold: { type: 'number', description: 'Escalate when the win probability is at least this, 0 to 1. Higher saves more.' },
+            cost_threshold: { type: 'number', description: 'Escalate when the win probability is at least this, 0 to 1. Higher saves more: 0.6 means the dearer candidate is expected to score 20 points higher on requests like this one.' },
             target_strong_rate: {
               type: 'number',
-              description: 'Instead of cost_threshold: the share of requests (0 to 1) you want escalated; the threshold is calibrated from this run\'s past win probabilities once there are 20.',
+              description: 'Instead of cost_threshold: the share of requests (0 to 1) you want escalated. The threshold is calibrated from this run\'s past evidence-based win probabilities (per scope); until there are 20, nothing is escalated.',
             },
             strong_candidate: { type: 'string', description: 'Which dearer candidate to consider; default the dearer capable one with the highest observed success rate.' },
             max_premium_usd: { type: 'number', description: 'The most extra USD per 1,000 prompt plus completion tokens an escalation may cost.' },
+            scope: {
+              type: 'string',
+              pattern: '^[a-z0-9][a-z0-9._:/-]{0,63}$',
+              description: 'Optional label for the population this request belongs to (a product surface, workflow or subject, e.g. support:refunds). The estimate then uses only evidence recorded under the same scope, and outcomes recorded for this decision teach only that scope. On public benchmarks this is what makes learned escalation beat chance. A label, never personal data.',
+            },
           },
         },
         preference_history: {
           type: 'array',
           description:
-            'Optional evidence you kept from earlier runs, content-free: each item has features (the eight numbers a past answer reported) and either winner_id and loser_id, tie [a, b], or candidate_id with quality 0 to 1.',
+            'Optional evidence you kept from earlier runs, content-free: each item has features (the sixteen numbers a past answer reported, or the eight from 1.3.0) and either winner_id and loser_id, tie [a, b], or candidate_id with quality 0 to 1.',
           items: {
             type: 'object',
             properties: {
-              features: { type: 'array', items: { type: 'number' }, description: 'The eight feature numbers of that request, each 0 to 1.' },
+              features: { type: 'array', items: { type: 'number' }, description: 'The feature numbers of that request (sixteen, or eight from 1.3.0), each 0 to 1.' },
               winner_id: { type: 'string', description: 'The candidate whose answer was better.' },
               loser_id: { type: 'string', description: 'The candidate whose answer was worse.' },
               tie: { type: 'array', items: { type: 'string' }, description: 'Two candidate ids whose answers were as good as each other.' },
               candidate_id: { type: 'string', description: 'The candidate an outcome is about.' },
               quality: { type: 'number', description: 'That outcome\'s quality, 0 to 1 (1 = fully successful).' },
+              scope: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:/-]{0,63}$', description: 'The escalation.scope that request was routed under, if any; a scoped request counts only items of its own scope.' },
             },
           },
         },
