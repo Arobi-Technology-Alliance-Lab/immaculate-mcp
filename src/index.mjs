@@ -19,7 +19,7 @@ import { LocalImmaculateEngine } from './engine.mjs';
 const SERVER_INFO = {
   name: 'arobi-immaculate-mcp',
   title: 'Arobi Immaculate MCP (local engine)',
-  version: '1.4.0',
+  version: '1.5.0',
 };
 
 // What each tool does to this server's local chain, for MCP clients that decide by it (behaviour annotations). The
@@ -128,6 +128,28 @@ export const TOOL_DEFINITIONS = [
         principal: { type: 'string', description: 'Who is acting.' },
         auth_method: { type: 'string', description: 'How the principal authenticated, e.g. webauthn.' },
         auth_freshness_sec: { type: 'number', description: 'Age in seconds of that authentication.' },
+        effect_key: {
+          type: 'string',
+          description: 'Optional. The downstream thing this action changes, e.g. deploy:site-a. While an effect on this key is open (started, IN_DOUBT or PARTIAL), the action is DENIED as EFFECT_OPEN and the answer names the open effect.',
+        },
+        reversal_class: {
+          type: 'string',
+          enum: ['REVERSIBLE', 'COMPENSABLE', 'IRREVERSIBLE'],
+          description: 'Optional. How the effect can be undone. IRREVERSIBLE (mail sent, a chain transaction, physical motion) is DENIED unless human_approval names a person who approved it in the last 15 minutes.',
+        },
+        human_approval: {
+          type: 'object',
+          description: 'For an IRREVERSIBLE effect: the person who approved it. The local engine records what you report; it does not verify the person.',
+          properties: {
+            approver: { type: 'string', description: 'Who approved.' },
+            auth_method: { type: 'string', description: 'How they authenticated.' },
+            approved_at: { type: 'string', description: 'When they approved, ISO 8601.' },
+          },
+        },
+        compensates_effect_id: {
+          type: 'string',
+          description: 'Optional. When this authorization is for the compensation of an open effect on the same key, that effect\'s id; it is the one authorization an open effect admits on its key.',
+        },
       },
       required: ['route_grant', 'action', 'consequence_tier', 'principal'],
     },
@@ -246,6 +268,135 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'arobi_begin_effect',
+    title: 'Start an authorized effect',
+    annotations: { title: 'Start an authorized effect', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'Start the effect a GRANTED authorization allows, and seal EFFECT_STARTED: its steps, the postcondition a read-back must show, how it is undone, a deadline and the cleanup owner (default: the grant\'s issuer). An effect not closed by its deadline reads IN_DOUBT on the next call, with no call needed from the executor. A retry with the same idempotency_key replays the start instead of applying it twice; a start on a key with an open effect is DENIED and names it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        authorization_record_hash: { type: 'string', description: 'record_hash of the GRANTED AUTHORIZATION this effect carries out (one effect per authorization).' },
+        effect_key: { type: 'string', description: 'The downstream thing it changes; default the authorization\'s effect_key.' },
+        steps: { type: 'array', items: { type: 'string' }, description: 'The step names, in order (1 to 32, distinct). Each gets its own receipt.' },
+        postcondition: { type: 'string', description: 'What a read-back of the downstream state must show for the effect to be COMMITTED.' },
+        reversal: {
+          type: 'object',
+          description: 'How the effect is undone.',
+          properties: {
+            class: { type: 'string', enum: ['REVERSIBLE', 'COMPENSABLE', 'IRREVERSIBLE'], description: 'REVERSIBLE names its inverse; COMPENSABLE names the action that undoes it; IRREVERSIBLE needs the authorization\'s human approval.' },
+            inverse: { type: 'string', description: 'For REVERSIBLE: the inverse operation.' },
+            compensation: { type: 'string', description: 'For COMPENSABLE: the compensating action, e.g. revert the commit or restore the previous deploy.' },
+          },
+          required: ['class'],
+        },
+        deadline_sec: { type: 'integer', description: 'Seconds from now by which the effect is closed (1 to 604800); after that it reads IN_DOUBT.' },
+        cleanup_owner: { type: 'string', description: 'Who cleans up if it is left part-done; default the grant\'s issuer.' },
+        idempotency_key: { type: 'string', description: 'Your key for this effect (8 to 200 characters); a retry with the same key replays the start.' },
+        attempt: { type: 'integer', description: 'The attempt number, from 1.' },
+      },
+      required: ['authorization_record_hash', 'steps', 'postcondition', 'reversal', 'deadline_sec', 'idempotency_key'],
+    },
+  },
+  {
+    name: 'arobi_record_step',
+    title: 'Record one step of an effect',
+    annotations: { title: 'Record one step of an effect', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'Seal the receipt of one declared step of a started effect: ok or failed, with an optional digest of its evidence. A step already recorded ok is not recorded twice. A receipt after the deadline is marked late, and still says what landed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        effect_id: { type: 'string', description: 'The effect arobi_begin_effect started.' },
+        step: { type: 'string', description: 'One of its declared steps.' },
+        status: { type: 'string', enum: ['ok', 'failed'], description: 'How the step ended.' },
+        evidence_digest: { type: 'string', description: 'Optional sha256 hex of the step\'s evidence.' },
+        detail: { type: 'string', description: 'Optional note, up to 300 characters.' },
+      },
+      required: ['effect_id', 'step', 'status'],
+    },
+  },
+  {
+    name: 'arobi_close_effect',
+    title: 'Close an effect on its read-back',
+    annotations: { title: 'Close an effect on its read-back', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'Close a started or IN_DOUBT effect and seal EFFECT_CLOSED. The outcome is decided here, not asserted: COMMITTED only when the read-back shows the postcondition and every step has an ok receipt; ABORTED when the read-back shows nothing changed (whatever the steps reported) or there is no read-back and no ok step; PARTIAL otherwise. A committed compensation also marks the effect it undoes COMPENSATED.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        effect_id: { type: 'string', description: 'The effect to close.' },
+        read_back: {
+          type: 'object',
+          description: 'What you read back from the downstream system after the steps. Without it the effect is never COMMITTED.',
+          properties: {
+            postcondition_met: { type: 'boolean', description: 'Whether the downstream state shows the declared postcondition.' },
+            downstream_changed: { type: 'boolean', description: 'Whether anything changed downstream at all.' },
+            evidence_digest: { type: 'string', description: 'Optional sha256 hex of what was read back.' },
+            detail: { type: 'string', description: 'Optional note, up to 300 characters.' },
+          },
+          required: ['postcondition_met', 'downstream_changed'],
+        },
+      },
+      required: ['effect_id'],
+    },
+  },
+  {
+    name: 'arobi_list_open_effects',
+    title: 'List open effects and their owners',
+    annotations: { title: 'List open effects and their owners', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'List every effect still open in this run (started, IN_DOUBT or PARTIAL) with its cleanup owner, age, deadline and the receipts that landed. Listing first marks overdue effects IN_DOUBT, which seals a record, so this tool is not read-only.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'arobi_compensate',
+    title: 'Start the compensation of an effect',
+    annotations: { title: 'Start the compensation of an effect', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it and carried out under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. An IRREVERSIBLE effect cannot be compensated, only accepted.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        effect_id: { type: 'string', description: 'The effect to undo.' },
+        authorization_record_hash: { type: 'string', description: 'record_hash of the GRANTED AUTHORIZATION for the compensation.' },
+        steps: { type: 'array', items: { type: 'string' }, description: 'The compensation\'s steps.' },
+        postcondition: { type: 'string', description: 'The earlier state the read-back must show.' },
+        reversal: {
+          type: 'object',
+          description: 'How the compensation itself is undone.',
+          properties: {
+            class: { type: 'string', enum: ['REVERSIBLE', 'COMPENSABLE', 'IRREVERSIBLE'], description: 'Its reversal class.' },
+            inverse: { type: 'string', description: 'For REVERSIBLE: the inverse operation.' },
+            compensation: { type: 'string', description: 'For COMPENSABLE: the compensating action.' },
+          },
+          required: ['class'],
+        },
+        deadline_sec: { type: 'integer', description: 'Seconds from now by which the compensation is closed.' },
+        idempotency_key: { type: 'string', description: 'Your key for the compensation (8 to 200 characters).' },
+      },
+      required: ['effect_id', 'authorization_record_hash', 'steps', 'postcondition', 'reversal', 'deadline_sec', 'idempotency_key'],
+    },
+  },
+  {
+    name: 'arobi_accept_effect',
+    title: 'Accept an effect as it stands',
+    annotations: { title: 'Accept an effect as it stands', ...APPENDS_LOCAL_CHAIN },
+    description:
+      'A person accepts an IN_DOUBT or PARTIAL effect as it stands instead of compensating it, and EFFECT_ACCEPTED is sealed with who they are, how they authenticated (within the last 300 s) and why.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        effect_id: { type: 'string', description: 'The effect to accept.' },
+        accepted_by: { type: 'string', description: 'The person accepting it.' },
+        auth_method: { type: 'string', description: 'How they authenticated.' },
+        auth_freshness_sec: { type: 'number', description: 'Age in seconds of that authentication (at most 300).' },
+        reason: { type: 'string', description: 'Why it is accepted as it stands.' },
+      },
+      required: ['effect_id', 'accepted_by', 'auth_method', 'auth_freshness_sec', 'reason'],
+    },
+  },
+  {
     name: 'arobi_verify_chain',
     title: 'Verify a sealed record chain',
     annotations: { title: 'Verify a sealed record chain', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -292,6 +443,18 @@ function handleToolCall(name, args) {
       return engine.classifyAndRoute(args);
     case 'arobi_record_route_outcome':
       return engine.recordRouteOutcome(args);
+    case 'arobi_begin_effect':
+      return engine.beginEffect(args);
+    case 'arobi_record_step':
+      return engine.recordEffectStep(args);
+    case 'arobi_close_effect':
+      return engine.closeEffect(args);
+    case 'arobi_list_open_effects':
+      return engine.listOpenEffects();
+    case 'arobi_compensate':
+      return engine.compensateEffect(args);
+    case 'arobi_accept_effect':
+      return engine.acceptEffect(args);
     case 'arobi_verify_chain':
       return engine.verifyChain(args);
     default:

@@ -12,7 +12,7 @@ function call(id, name, args) {
   return handleJsonRpc({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }).result;
 }
 
-test('MCP initialize, ping, and tools/list return all 6 tools', () => {
+test('MCP initialize, ping, and tools/list return all 12 tools', () => {
   const init = handleJsonRpc({
     jsonrpc: '2.0',
     id: 1,
@@ -32,6 +32,12 @@ test('MCP initialize, ping, and tools/list return all 6 tools', () => {
     'arobi_authorize',
     'arobi_classify_and_route',
     'arobi_record_route_outcome',
+    'arobi_begin_effect',
+    'arobi_record_step',
+    'arobi_close_effect',
+    'arobi_list_open_effects',
+    'arobi_compensate',
+    'arobi_accept_effect',
     'arobi_verify_chain',
   ]);
 });
@@ -285,7 +291,11 @@ test('every tool is titled and annotated, and every parameter is described', () 
   }
   assert.deepEqual(missing, []);
   const readOnly = Object.fromEntries(list.result.tools.map((tool) => [tool.name, tool.annotations.readOnlyHint]));
-  assert.deepEqual(readOnly, { arobi_route_grant: false, arobi_revoke_grant: false, arobi_authorize: false, arobi_classify_and_route: false, arobi_record_route_outcome: false, arobi_verify_chain: true });
+  assert.deepEqual(readOnly, {
+    arobi_route_grant: false, arobi_revoke_grant: false, arobi_authorize: false, arobi_classify_and_route: false, arobi_record_route_outcome: false,
+    arobi_begin_effect: false, arobi_record_step: false, arobi_close_effect: false, arobi_list_open_effects: false, arobi_compensate: false, arobi_accept_effect: false,
+    arobi_verify_chain: true,
+  });
   const destructive = list.result.tools.filter((tool) => tool.annotations.destructiveHint).map((tool) => tool.name);
   assert.deepEqual(destructive, ['arobi_revoke_grant']);
   const init = handleJsonRpc({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-06-18' } });

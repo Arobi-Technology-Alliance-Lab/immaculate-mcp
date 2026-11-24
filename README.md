@@ -28,6 +28,12 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 | `arobi_authorize` | Verifies that the grant was sealed by this server and not revoked (an unsigned grant, one signed with any other key, or a revoked one is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
 | `arobi_classify_and_route` | Classifies prompt complexity, filters capable candidates, picks the lowest-cost capable model or applies an explicit `quality_exception` uplift rule, detects repeated work, and optionally seals a `ROUTING_DECISION` record. With `escalation` set, it pays for a dearer capable candidate only when the predicted chance it beats the cheapest capable one **on this request** reaches your cost threshold (learned escalation, below). |
 | `arobi_record_route_outcome` | Teaches learned escalation: records how a routed request turned out (`quality` 0 to 1, or `ok`) and, optionally, how it compared with another candidate on the same request. Seals a hash-chained `ROUTE_OUTCOME` record and returns the run's routing stats (escalated share, mean quality per candidate). |
+| `arobi_begin_effect` | Starts the effect a **GRANTED** authorization allows and seals `EFFECT_STARTED`. It names the steps, the postcondition a read-back must show, how the effect is undone, a deadline and the cleanup owner (partly-run actions, below). |
+| `arobi_record_step` | Seals the receipt of one declared step: ok or failed, with an optional evidence digest. |
+| `arobi_close_effect` | Closes an effect on its read-back and seals `EFFECT_CLOSED`. The engine decides the outcome: **COMMITTED**, **ABORTED** or **PARTIAL**. |
+| `arobi_list_open_effects` | Lists every open effect (started, **IN_DOUBT** or **PARTIAL**) with its owner, age, deadline and the receipts that landed. |
+| `arobi_compensate` | Starts the compensation of an effect: an authorized effect of its own, linked to the one it undoes. |
+| `arobi_accept_effect` | A person accepts an **IN_DOUBT** or **PARTIAL** effect as it stands, and `EFFECT_ACCEPTED` is sealed. |
 | `arobi_verify_chain` | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
 
 ### Learned escalation (after RouteLLM)
@@ -121,6 +127,47 @@ dearer one, following RouteLLM (Ong et al., *RouteLLM: Learning to Route LLMs wi
   yours: the engine learns from what you record and makes no model calls of its own. Without `escalation`, routing
   and the sealed records are exactly as in 1.2.0, and an unscoped escalation is exactly as in 1.3.0.
 
+### Partly-run actions (effects)
+
+`arobi_authorize` decides before an action runs. The effect tools record what happened after it, in the same hash
+chain, so an action that only partly ran is detected, has an owner and can be reversed:
+
+```
+AUTHORIZED -> STARTED -> (step receipts) -> CLOSED: COMMITTED | ABORTED | PARTIAL
+                 |                                        |
+                 +-- deadline passes, no close -> IN_DOUBT +--> COMPENSATED | ACCEPTED
+```
+
+- **Detect.**
+  - Every start names a deadline. An effect still open after it reads **IN_DOUBT** on the next call to the engine,
+    with no call from the executor. The transition is sealed once.
+  - Each step leaves its own receipt.
+  - A close is checked, not asserted. **COMMITTED** needs a read-back that shows the declared postcondition and an ok
+    receipt for every step. A run whose read-back shows nothing changed closes **ABORTED**, whatever its steps
+    reported. Without a read-back the effect is never COMMITTED.
+- **Own.**
+  - The start names the cleanup owner; by default that is the grant's issuer.
+  - `arobi_list_open_effects` lists the obligations.
+  - While an effect on a key is open, `arobi_authorize` with that `effect_key`, or a new start on it, is **DENIED**
+    (`EFFECT_OPEN`) and names the open effect.
+  - A retry with the same `idempotency_key` replays the start instead of applying it twice. A step already recorded ok
+    is not recorded again.
+- **Reverse.**
+  - A start declares `REVERSIBLE` (naming the inverse), `COMPENSABLE` (naming the compensating action) or
+    `IRREVERSIBLE`.
+  - `arobi_authorize` with `reversal_class: IRREVERSIBLE` is DENIED unless `human_approval` names a person who
+    approved it in the last 15 minutes. That is decided before the effect starts, not discovered afterwards.
+  - A compensation is itself an authorized effect on the same key. Authorize it with `compensates_effect_id`, the one
+    authorization an open effect admits on its key. When the compensation's read-back shows the earlier state, the
+    original becomes **COMPENSATED**.
+  - An IRREVERSIBLE effect cannot be compensated. A person may instead close an **IN_DOUBT** or **PARTIAL** effect as
+    **ACCEPTED**, and that is sealed too.
+- **What the local engine can and cannot know.** It does not observe the downstream system. The read-backs and the
+  human approval are what the caller reports. The engine checks that they were reported, that they agree with what
+  the start declared, and seals them, so a later reader sees exactly what was claimed and when. For approvals and
+  read-backs checked by someone other than the agent's operator, use the hosted service once it has these tools; it
+  does not yet.
+
 ### The local engine and the hosted service
 
 - **Two implementations.** The local engine is a separate, smaller implementation for offline development, testing and evaluation, and its rules are the ones above (see `src/engine.mjs`). The hosted service applies its own policy and records each decision to your workspace's ledger, so for the same input its verdict can differ from the local engine's.
@@ -129,7 +176,8 @@ dearer one, following RouteLLM (Ong et al., *RouteLLM: Learning to Route LLMs wi
 - **Tools.** Both have `arobi_route_grant`, `arobi_revoke_grant`, `arobi_authorize`, `arobi_classify_and_route` and
   `arobi_verify_chain`. The hosted service added `arobi_revoke_grant` in its version 1.1.0 (2026-11-21) and the local
   engine in 1.2.0. Learned escalation and `arobi_record_route_outcome` are in the local engine from 1.3.0 and not in
-  the hosted service yet. A local revocation, like the local key, lasts for the run that made it:
+  the hosted service yet. The effect tools (partly-run actions) are in the local engine from 1.5.0 and not in the
+  hosted service yet. A local revocation, like the local key, lasts for the run that made it:
   a local grant ends when it is revoked, when it expires, or when the run that sealed it stops. Neither one lists or
   searches sealed records yet: records come back with each decision, and the hosted service keeps them in your
   workspace's ledger.
