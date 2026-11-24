@@ -9,8 +9,10 @@
 
 import crypto from 'node:crypto';
 import {
-  complexityOf, evidenceFromHistory, FEATURE_NAMES, routeFeatures, thresholdForStrongRate, winProbability,
+  complexityOf, evidenceFromHistory, evidenceInScope, FEATURE_NAMES, isScopeLabel, routeFeatures, thresholdForStrongRate,
+  winProbability,
 } from './route-learning.mjs';
+import { EffectLedger } from './effects.mjs';
 
 // How much routing evidence one run keeps (oldest dropped first): win probabilities for calibration, outcomes and
 // pairwise preferences, and the routing decisions outcomes can refer to.
@@ -32,6 +34,36 @@ export function canonicalJson(value) {
 
 export function sha256Hex(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+// What is sealed, and what the verifier accepts, is plain JSON data: strings, numbers, booleans, null, dense arrays
+// and plain objects, with no functions, symbols, getters or class instances. Then the bytes that are hashed are the
+// bytes a reader sees, and a record carries no code. (An undefined object value is allowed: canonical JSON drops it,
+// exactly as if the key were absent.) Returns null for plain data, else what is wrong and where.
+export function plainDataProblem(value, path = '$', depth = 0) {
+  if (depth > 32) return `${path} is nested more than 32 levels deep`;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return null;
+  if (typeof value !== 'object') return `${path} is a ${typeof value}, not data`;
+  const isArray = Array.isArray(value);
+  const proto = Object.getPrototypeOf(value);
+  if (!isArray && proto !== Object.prototype && proto !== null) return `${path} is not a plain object`;
+  if (isArray && proto !== Array.prototype) return `${path} is not a plain array`;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key === 'symbol') return `${path} has a symbol key`;
+    if (isArray && key === 'length') continue;
+    const where = isArray ? `${path}[${key}]` : `${path}.${key}`;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) return `${where} is a getter or setter`;
+    if (!descriptor.enumerable) return `${where} is not enumerable`;
+    if (descriptor.value === undefined) {
+      if (isArray) return `${where} is undefined`;
+      continue;
+    }
+    const problem = plainDataProblem(descriptor.value, where, depth + 1);
+    if (problem) return problem;
+  }
+  if (isArray && Object.keys(value).length !== value.length) return `${path} has holes`;
+  return null;
 }
 
 function matchesActionPattern(allowedActions, requestedAction) {
@@ -60,8 +92,9 @@ export function signerKidOf(publicKeyPem) {
 
 export class LocalImmaculateEngine {
   // The signing key is generated when the engine starts: grants and records are signed by this run's key, and a
-  // grant is good only for the run of the server that sealed it.
-  constructor() {
+  // grant is good only for the run of the server that sealed it. `now` is the clock (milliseconds), for tests.
+  constructor(options = {}) {
+    this.now = typeof options.now === 'function' ? options.now : () => Date.now();
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
     this.privateKey = privateKey;
     this.publicKey = publicKey;
@@ -73,10 +106,32 @@ export class LocalImmaculateEngine {
     // of the old run's grants anyway.
     this.revocations = new Map();
     // Learned escalation (RouteLLM-style): content-free evidence, the run's past win probabilities for threshold
-    // calibration, and the recorded routing decisions an outcome can refer to. Like the key, these last for the run.
+    // calibration ({ scope, p }, so each scope calibrates on its own), and the recorded routing decisions an outcome
+    // can refer to. Like the key, these last for the run.
     this.routeEvidence = [];
     this.winScores = [];
     this.routeDecisions = new Map();
+    // Partly-run actions: the life of each authorized effect, sealed in this chain (src/effects.mjs).
+    this.effects = new EffectLedger({
+      seal: (type, payload) => this.sealRecord(type, payload),
+      now: () => this.now(),
+      digest: (value) => sha256Hex(canonicalJson(value)),
+      grantStopped: (info) => this.grantStopped(info),
+    });
+  }
+
+  // Why the grant behind a GRANTED authorization can start nothing more, or null: revoked in this run (the engine's
+  // stop), or expired. In-flight effects are still observed and closed; only new work is refused.
+  grantStopped({ grant_hash, grant_expires_at }) {
+    const revoked = this.revocations.get(grant_hash);
+    if (revoked) {
+      return { reason_code: 'GRANT_REVOKED', reason: `The grant behind that authorization was revoked at ${revoked.revoked_at}; nothing new starts under it.` };
+    }
+    const expMs = Date.parse(grant_expires_at);
+    if (typeof grant_expires_at === 'string' && (Number.isNaN(expMs) || expMs <= this.now())) {
+      return { reason_code: 'GRANT_EXPIRED', reason: `The grant behind that authorization expired at ${grant_expires_at}; nothing new starts under it.` };
+    }
+    return null;
   }
 
   remember(list, item) {
@@ -103,9 +158,11 @@ export class LocalImmaculateEngine {
   }
 
   sealRecord(recordType, payload) {
+    const problem = plainDataProblem(payload, 'payload');
+    if (problem) throw new Error(`Only plain data is sealed: ${problem}.`);
     const seq = this.chain.length + 1;
     const prevHash = this.chain.length === 0 ? 'genesis' : this.chain[this.chain.length - 1].record_hash;
-    const timestamp = new Date().toISOString();
+    const timestamp = new Date(this.now()).toISOString();
 
     const body = {
       seq,
@@ -144,11 +201,11 @@ export class LocalImmaculateEngine {
     if (!granted_by || typeof granted_by !== 'string') throw new Error('granted_by (string) is required.');
     if (!delegated_to || typeof delegated_to !== 'string') throw new Error('delegated_to (string) is required.');
 
-    const issuedAt = new Date().toISOString();
+    const issuedAt = new Date(this.now()).toISOString();
     const resolvedExpiry =
       typeof expires_at === 'string' && expires_at.trim()
         ? expires_at.trim()
-        : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        : new Date(this.now() + 24 * 60 * 60 * 1000).toISOString();
 
     if (Number.isNaN(Date.parse(resolvedExpiry))) {
       throw new Error('expires_at must be a valid ISO 8601 timestamp.');
@@ -234,7 +291,7 @@ export class LocalImmaculateEngine {
       return refuse('GRANT_ALREADY_REVOKED', `This grant was already revoked at ${prior.revoked_at}.`, { route_revoke: prior });
     }
     const expMs = Date.parse(route_grant.expires_at);
-    if (!Number.isNaN(expMs) && expMs <= Date.now()) {
+    if (!Number.isNaN(expMs) && expMs <= this.now()) {
       return refuse('GRANT_EXPIRED', `This grant already ended when it expired at ${route_grant.expires_at}; it authorizes nothing.`);
     }
 
@@ -244,7 +301,7 @@ export class LocalImmaculateEngine {
       grant_hash: route_grant.grant_hash,
       route_id: route_grant.route_id,
       reason: typeof reason === 'string' ? reason : '',
-      revoked_at: new Date().toISOString(),
+      revoked_at: new Date(this.now()).toISOString(),
     };
     const revokeHash = sha256Hex(canonicalJson(revokeCore));
     const revokeSignature = crypto
@@ -282,6 +339,10 @@ export class LocalImmaculateEngine {
       auth_method,
       auth_freshness_sec,
       route_revoke,
+      effect_key,
+      reversal_class,
+      human_approval,
+      compensates_effect_id,
     } = args;
 
     if (!route_grant || typeof route_grant !== 'object') {
@@ -342,7 +403,7 @@ export class LocalImmaculateEngine {
 
     if (decision === 'GRANTED' && route_grant.expires_at) {
       const expMs = Date.parse(route_grant.expires_at);
-      const notExpired = !Number.isNaN(expMs) && expMs > Date.now();
+      const notExpired = !Number.isNaN(expMs) && expMs > this.now();
       checks.push({ check: 'grant_not_expired', passed: notExpired });
       if (!notExpired) {
         decision = 'DENIED';
@@ -375,6 +436,20 @@ export class LocalImmaculateEngine {
           reasonCode = 'CATEGORY_CAP_EXCEEDED';
           reason = `Transaction amount ${amount} exceeds cap ${cap} for category "${category}".`;
         }
+      }
+    }
+
+    // An action with a downstream effect: no open effect on its key, and an IRREVERSIBLE one only with a person's
+    // approval, decided here at authorization rather than discovered afterwards.
+    let openEffectId;
+    if (decision === 'GRANTED' && (effect_key !== undefined || reversal_class !== undefined || compensates_effect_id !== undefined)) {
+      const refused = this.effects.authorizationGate({ effect_key, reversal_class, human_approval, compensates_effect_id });
+      checks.push({ check: 'effect_gate', passed: !refused });
+      if (refused) {
+        decision = 'DENIED';
+        reasonCode = refused.reason_code;
+        reason = refused.reason;
+        openEffectId = refused.open_effect_id;
       }
     }
 
@@ -412,17 +487,49 @@ export class LocalImmaculateEngine {
       reason_code: reasonCode,
       // Only on a decision a revocation made; canonical JSON drops undefined, so other records are unchanged.
       revoke_id: revokeId,
+      // Only when the action declares an effect; the same rule keeps other records unchanged.
+      effect_key,
+      reversal_class,
+      human_approval: human_approval && typeof human_approval === 'object'
+        ? { approver: human_approval.approver, auth_method: human_approval.auth_method, approved_at: human_approval.approved_at }
+        : undefined,
+      compensates_effect_id,
+      open_effect_id: openEffectId,
     });
+
+    if (decision === 'GRANTED') {
+      this.effects.rememberAuthorization(record.record_hash, {
+        action, effect_key, reversal_class, compensates_effect_id, granted_by: route_grant.granted_by,
+        grant_hash: route_grant.grant_hash, grant_expires_at: route_grant.expires_at,
+      });
+    }
 
     return {
       decision,
       reason_code: reasonCode,
       reason,
       checks,
+      ...(openEffectId ? { open_effect_id: openEffectId } : {}),
       mode: 'local',
       record,
     };
   }
+
+  // Partly-run actions (src/effects.mjs): start, step receipts, checked close, reconciliation, open obligations,
+  // compensation, acceptance.
+  beginEffect(args) { return this.effects.begin(args); }
+
+  recordEffectStep(args) { return this.effects.recordStep(args); }
+
+  closeEffect(args) { return this.effects.close(args); }
+
+  claimEffect(args) { return this.effects.claim(args); }
+
+  listOpenEffects() { return this.effects.listOpen(); }
+
+  compensateEffect(args) { return this.effects.compensate(args); }
+
+  acceptEffect(args) { return this.effects.accept(args); }
 
   classifyAndRoute(args) {
     if (!args || typeof args !== 'object') {
@@ -518,16 +625,26 @@ export class LocalImmaculateEngine {
     // answer beats the cheapest capable one on THIS request clears the cost threshold (RouteLLM, Eq. 2). The capability
     // floor and max_premium_usd still bound it, and it can only escalate, never undo an explicit quality_exception.
     let escalationResult;
+    let escalationScope;
     const escalation = args.escalation;
     if (escalation !== undefined) {
       if (!escalation || typeof escalation !== 'object') throw new Error('escalation must be an object.');
-      const { cost_threshold, target_strong_rate, strong_candidate, max_premium_usd } = escalation;
+      const { cost_threshold, target_strong_rate, strong_candidate, max_premium_usd, scope } = escalation;
       if (cost_threshold !== undefined && !(typeof cost_threshold === 'number' && cost_threshold >= 0 && cost_threshold <= 1)) {
         throw new Error('escalation.cost_threshold must be a number from 0 to 1.');
       }
       if (target_strong_rate !== undefined && !(typeof target_strong_rate === 'number' && target_strong_rate >= 0 && target_strong_rate <= 1)) {
         throw new Error('escalation.target_strong_rate must be a number from 0 to 1.');
       }
+      if (scope !== undefined && !isScopeLabel(scope)) {
+        throw new Error('escalation.scope must be a lowercase label of 1 to 64 characters (a-z, 0-9, . _ : / -), starting with a letter or digit.');
+      }
+      // The trade-off is the caller's to state. P = 0.5 + (expected quality gain) / 2, so any threshold near 0.5 buys
+      // the premium whenever the dearer candidate is better at all, which on public benchmarks is 83-100% of requests.
+      if (cost_threshold === undefined && target_strong_rate === undefined) {
+        throw new Error('escalation needs cost_threshold or target_strong_rate: P = 0.5 + (expected quality gain) / 2, so cost_threshold 0.6 escalates only when the dearer candidate is expected to score 20 points higher on requests like this one, and target_strong_rate 0.2 escalates about a fifth of requests.');
+      }
+      escalationScope = scope;
       const premiumCap = max_premium_usd !== undefined ? Number(max_premium_usd) : Infinity;
       const dearer = capable.filter((c) => c !== cheapest && c.total_unit_cost_usd - cheapest.total_unit_cost_usd <= premiumCap);
       let strong = null;
@@ -538,36 +655,41 @@ export class LocalImmaculateEngine {
         strong = [...dearer].sort((a, b) => ((b.observed_success_rate ?? -1) - (a.observed_success_rate ?? -1))
           || (b.total_unit_cost_usd - a.total_unit_cost_usd))[0];
       }
+      // Present in the result (and so in the sealed record) only when given, so unscoped records are as before.
+      const scoped = scope === undefined ? {} : { scope };
       if (!strong) {
         escalationResult = {
           escalated: false,
+          ...scoped,
           reason: strong_candidate !== undefined
             ? `strong_candidate ${strong_candidate} is not a capable candidate within the premium cap.`
             : 'No dearer capable candidate within the premium cap.',
         };
       } else {
-        const evidence = [...this.routeEvidence, ...evidenceFromHistory(args.preference_history)];
+        // With a scope, only evidence recorded under that scope counts: the run's own and the caller's history.
+        const evidence = evidenceInScope([...this.routeEvidence, ...evidenceFromHistory(args.preference_history)], scope);
         const win = winProbability({ features, weakId: cheapest.id, strongId: strong.id, evidence, complexity });
         let threshold = cost_threshold;
         let thresholdSource = 'cost_threshold';
-        if (threshold === undefined && target_strong_rate !== undefined) {
-          const calibrated = thresholdForStrongRate(this.winScores, target_strong_rate);
-          threshold = calibrated ?? 0.5;
-          thresholdSource = calibrated === null ? 'default_until_20_scores' : 'calibrated_to_target_strong_rate';
-        }
         if (threshold === undefined) {
-          threshold = 0.5;
-          thresholdSource = 'default';
+          // Calibrated from this scope's past estimates; until there are 20 there is no threshold to guess, so
+          // nothing is escalated (a guessed 0.5 would escalate almost everything).
+          const pastScores = this.winScores.filter((s) => s.scope === scope).map((s) => s.p);
+          const calibrated = thresholdForStrongRate(pastScores, target_strong_rate);
+          threshold = calibrated;
+          thresholdSource = calibrated === null ? 'calibrating_until_20_scores' : 'calibrated_to_target_strong_rate';
         }
-        this.remember(this.winScores, win.p);
-        const escalate = win.p >= threshold && selected !== strong;
+        // Calibration takes only estimates that rested on evidence: the prior is a constant per complexity.
+        if (win.source !== 'complexity_prior') this.remember(this.winScores, { scope, p: win.p });
+        const escalate = threshold !== null && win.p >= threshold && selected !== strong;
         if (escalate) {
           selected = strong;
           justificationType = 'learned_escalation';
-          justification = `Escalated to ${strong.id}: P(it beats ${cheapest.id} on this request) = ${win.p} >= cost threshold ${threshold} (${win.source}).`;
+          justification = `Escalated to ${strong.id}: P(it beats ${cheapest.id} on this request) = ${win.p} >= cost threshold ${threshold} (${win.source}${scope === undefined ? '' : `, scope ${scope}`}).`;
         }
         escalationResult = {
           escalated: escalate,
+          ...scoped,
           strong_id: strong.id,
           win_probability: win.p,
           win_probability_source: win.source,
@@ -598,7 +720,7 @@ export class LocalImmaculateEngine {
       this.seenPrompts.set(promptHash, { selected_id: selected.id, record_hash: sealed.record_hash });
       this.routeDecisions.set(sealed.record_hash, {
         features, cheapest_id: cheapest.id, selected_id: selected.id, escalated: Boolean(escalationResult?.escalated),
-        candidate_ids: capable.map((c) => c.id),
+        candidate_ids: capable.map((c) => c.id), scope: escalationScope,
       });
       if (this.routeDecisions.size > ROUTE_MEMORY) this.routeDecisions.delete(this.routeDecisions.keys().next().value);
     }
@@ -656,8 +778,10 @@ export class LocalImmaculateEngine {
         ? { kind: 'pair', features: decision.features, a: candidateId, b: other, tie: true }
         : { kind: 'pair', features: decision.features, a: result === 'win' ? candidateId : other, b: result === 'win' ? other : candidateId, tie: false };
     }
-    this.remember(this.routeEvidence, { kind: 'outcome', features: decision.features, candidate_id: candidateId, quality: q });
-    if (pair) this.remember(this.routeEvidence, pair);
+    // Evidence keeps the scope its decision was routed under, so it teaches only that scope's later requests.
+    const scoped = decision.scope === undefined ? {} : { scope: decision.scope };
+    this.remember(this.routeEvidence, { kind: 'outcome', features: decision.features, candidate_id: candidateId, quality: q, ...scoped });
+    if (pair) this.remember(this.routeEvidence, { ...pair, ...scoped });
     const sealed = shouldRecord
       ? this.sealRecord('ROUTE_OUTCOME', {
         routing_record_hash,
@@ -725,6 +849,12 @@ export class LocalImmaculateEngine {
           reason: `Record at index ${i} is not an object.`,
           mode: 'local',
         };
+      }
+      const problem = plainDataProblem(rec, `records[${i}]`);
+      if (problem) return broken(i, `Record at index ${i} is not plain data (${problem}); a record carries data, never code.`);
+      // The sequence starts at 1 and has no gap: a missing, repeated (forked) or reordered record breaks it here.
+      if (rec.seq !== i + 1) {
+        return broken(i, `Record at index ${i} has seq ${JSON.stringify(rec.seq)}, expected ${i + 1}: a record is missing, repeated or out of order.`);
       }
 
       const expectedPrev = i === 0 ? 'genesis' : records[i - 1].record_hash;

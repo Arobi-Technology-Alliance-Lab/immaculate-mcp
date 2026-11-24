@@ -9,9 +9,10 @@
  * top share c of questions to the strong model gives accuracy r(c); PGR(c) = (r(c) - r_weak) / (r_strong - r_weak);
  * APGR is the mean PGR over c in [0, 1]; CPT(x) is the smallest strong-call share that reaches PGR x. Random routing
  * scores APGR 0.5. Equal scores are averaged over random tie-breaking, so no router gains from their order.
- * Evidence never crosses folds: 5-fold cross-validation over a seeded shuffle. 95% intervals: a paired bootstrap over
- * the test questions with the cross-validated scores held fixed (bootstrap() below). Each training question contributes two
- * outcome records (weak right?, strong right?) with its eight content-free features, which is all the engine keeps.
+ * Evidence never crosses folds: 5-fold cross-validation over a seeded shuffle. Each training question contributes two
+ * outcome records (weak right?, strong right?) with its content-free features, which is all the engine keeps: the
+ * sixteen numbers of 1.4.0, or their first eight, which are exactly what 1.3.0 kept. 95% intervals come from a paired
+ * bootstrap over the test questions (the cross-validated scores held fixed).
  *
  * In-distribution cross-validation: training and test questions come from the same benchmark. RouteLLM's own tables
  * train on Chatbot Arena data and test out of distribution, so the numbers are not directly comparable.
@@ -20,7 +21,9 @@
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { complexityOf, routeFeatures, winProbability } from '../../src/route-learning.mjs';
+import {
+  complexityOf, evidenceInScope, FEATURE_COUNT, FEATURE_COUNT_V1, routeFeatures, winProbability,
+} from '../../src/route-learning.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(here, '.data');
@@ -90,9 +93,11 @@ function foldsOf(n) {
   return fold;
 }
 
-const evidenceOf = (items) => items.flatMap((item) => [
-  { kind: 'outcome', features: item.features, candidate_id: 'weak', quality: item.weak },
-  { kind: 'outcome', features: item.features, candidate_id: 'strong', quality: item.strong },
+// Each record carries the class as its scope, as arobi_record_route_outcome does for a decision routed with
+// escalation.scope; the scoped router then filters with the engine's own evidenceInScope.
+const evidenceOf = (items, dims = FEATURE_COUNT) => items.flatMap((item) => [
+  { kind: 'outcome', features: item.features.slice(0, dims), candidate_id: 'weak', quality: item.weak, scope: item.subject },
+  { kind: 'outcome', features: item.features.slice(0, dims), candidate_id: 'strong', quality: item.strong, scope: item.subject },
 ]);
 
 /** The information a class-level rule has: 0.5 + (s_strong - s_weak) / 2 over the class, Beta(1, 1)-smoothed. */
@@ -108,8 +113,10 @@ function scoreAll(items) {
   const scores = {
     random: items.map(() => 0.5),
     class_level: new Array(items.length).fill(0),
+    learned_v1: new Array(items.length).fill(0),
     learned: new Array(items.length).fill(0),
-    learned_within_class: new Array(items.length).fill(0),
+    learned_v1_scoped: new Array(items.length).fill(0),
+    learned_scoped: new Array(items.length).fill(0),
     oracle: items.map((i) => (i.strong > i.weak ? 1 : i.strong < i.weak ? 0 : 0.5)),
   };
   for (let f = 0; f < FOLDS; f += 1) {
@@ -120,14 +127,17 @@ function scoreAll(items) {
       bySubject.get(item.subject).push(item);
     }
     const all = evidenceOf(train);
-    const within = new Map([...bySubject].map(([k, v]) => [k, evidenceOf(v)]));
+    const allV1 = evidenceOf(train, FEATURE_COUNT_V1);
     const classScores = new Map([...bySubject].map(([k, v]) => [k, classScore(v)]));
     items.forEach((item, i) => {
       if (fold[i] !== f) return;
       const input = { features: item.features, weakId: 'weak', strongId: 'strong', complexity: item.complexity };
+      const inputV1 = { ...input, features: item.features.slice(0, FEATURE_COUNT_V1) };
       scores.class_level[i] = classScores.get(item.subject) ?? 0.5;
+      scores.learned_v1[i] = winProbability({ ...inputV1, evidence: allV1 }).p;
       scores.learned[i] = winProbability({ ...input, evidence: all }).p;
-      scores.learned_within_class[i] = winProbability({ ...input, evidence: within.get(item.subject) ?? [] }).p;
+      scores.learned_v1_scoped[i] = winProbability({ ...inputV1, evidence: evidenceInScope(allV1, item.subject) }).p;
+      scores.learned_scoped[i] = winProbability({ ...input, evidence: evidenceInScope(all, item.subject) }).p;
     });
   }
   return scores;
@@ -168,8 +178,9 @@ function metrics(items, score) {
 }
 
 const COMPARISONS = [
-  ['learned, same subject minus learned, all evidence', 'learned_within_class', 'learned'],
-  ['learned, same subject minus the class-level rate', 'learned_within_class', 'class_level'],
+  ['1.4.0 with scope minus 1.3.0', 'learned_scoped', 'learned_v1'],
+  ['sixteen minus eight features, no scope', 'learned', 'learned_v1'],
+  ['1.4.0 with scope minus the scope rate alone', 'learned_scoped', 'class_level'],
 ];
 
 // 95% intervals, by the same method as the public router-apgr suites (arobi-benchmarks scorer/apgr.mjs): a paired
@@ -298,8 +309,10 @@ const results = {
   routers: {
     random: 'every question scores 0.5',
     class_level: 'smoothed class-level estimate, class = MMLU subject (GSM8K is one class): what a per-class rule can see',
-    learned: 'learned escalation as this package runs it: similarity-weighted outcomes from every training question',
-    learned_within_class: 'learned escalation with evidence restricted to the same class',
+    learned_v1: '1.3.0: similarity-weighted outcomes from every training question, eight features',
+    learned: '1.4.0 without a scope: the same with sixteen features',
+    learned_v1_scoped: 'eight features, escalation.scope = the class (evidence from the same class only)',
+    learned_scoped: '1.4.0 with escalation.scope = the class: sixteen features, evidence from the same class only',
     oracle: 'upper bound: strong only where it alone is right',
   },
   results: [
@@ -313,7 +326,7 @@ for (const r of results.results) {
   for (const [name, m] of Object.entries(r.routers)) {
     const a = r.bootstrap.apgr_95ci[name];
     const c = r.bootstrap.cpt50_95ci[name];
-    console.log(`  ${name.padEnd(22)} APGR ${m.apgr} [${a[0]}, ${a[1]}]  CPT(50%) ${m.cpt50} [${c[0]}, ${c[1]}]  CPT(80%) ${m.cpt80}  PGR@20% ${m.pgr_at_20pct_strong}`);
+    console.log(`  ${name.padEnd(22)} APGR ${m.apgr}${a ? ` [${a[0]}, ${a[1]}]` : ''}  CPT(50%) ${m.cpt50}${c ? ` [${c[0]}, ${c[1]}]` : ''}  CPT(80%) ${m.cpt80}  PGR@20% ${m.pgr_at_20pct_strong}`);
   }
   for (const d of r.bootstrap.paired_differences) {
     console.log(`  ${d.comparison}: APGR difference 95% CI [${d.apgr_difference_95ci[0]}, ${d.apgr_difference_95ci[1]}], better in ${d.share_of_resamples_a_better} of resamples`);
