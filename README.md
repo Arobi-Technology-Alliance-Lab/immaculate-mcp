@@ -233,6 +233,13 @@ Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
   a local grant ends when it is revoked, when it expires, or when the run that sealed it stops. Neither one lists or
   searches sealed records yet: records come back with each decision, and the hosted service keeps them in your
   workspace's ledger.
+- **Versions.** The two have their own version numbers.
+  - `package.json` and the local engine's `serverInfo` carry the local engine's version.
+  - `server.json` is the Official MCP Registry entry for the hosted endpoint. Its version is the one the hosted
+    endpoint reports in its own `serverInfo`, and the publish workflow refuses any other.
+  - The registry's 1.2.0 and 1.3.0 entries were published with local-engine releases while the hosted endpoint still
+    reported 1.1.0. They describe the same endpoint, URL and header. The hosted endpoint's next release takes the next
+    number, and the two agree again.
 
 ---
 

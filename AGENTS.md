@@ -19,6 +19,10 @@ Proprietary License, the same text as every Arobi repository).
 - **No internals of the hosted service go in this repository.** The local engine is its own implementation, written
   from the public tool descriptions, and the README says how it differs from the hosted service. Keep that section
   true whenever either one changes.
+- **Two version numbers (2026-11-24).** `server.json` is the hosted endpoint's registry entry: bump its version only
+  with a hosted release whose `serverInfo` reports that version (the publish workflow checks it before publishing).
+  A local-engine release bumps `package.json` and `SERVER_INFO` in `src/index.mjs` only. The registry's 1.2.0 and
+  1.3.0 were local releases published while the hosted endpoint reported 1.1.0; don't repeat that.
 - **Never weaken the local checks.** `arobi_authorize` honours only grants this server sealed, and
   `arobi_verify_chain` requires one signer and reports whether it was pinned. The tests in `test/` hold both.
 
