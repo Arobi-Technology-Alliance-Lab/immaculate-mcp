@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "bench:route-escalation": "node bench/route-escalation/fetch-data.mjs && node bench/route-escalation/run.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

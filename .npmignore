@@ -1,0 +1,2 @@
+# Benchmark data and results are fetched and written locally, never published in the package.
+bench/

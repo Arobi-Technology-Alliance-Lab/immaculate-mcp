@@ -58,6 +58,25 @@ dearer one, following RouteLLM (Ong et al., *RouteLLM: Learning to Route LLMs wi
 - **No prompt text kept.** A request becomes eight content-free numbers: length, code, math, deep-reasoning and
   task markers, structured output, several questions, and non-ASCII text. Only those numbers and the outcomes are
   remembered. The prompt itself is only hashed, as before.
+- **Measured.** `npm run bench:route-escalation` runs the rule on RouteLLM's published per-question outcomes. Those
+  record whether each model answered correctly: GPT-4 1106 against Mixtral 8x7B, over MMLU (14,042 questions) and
+  GSM8K (1,319). It uses RouteLLM's metric, APGR, where random routing is 0.5, under 5-fold cross-validation with
+  ties averaged. Each figure carries a 95% interval from a paired bootstrap over the test questions (10,000
+  resamples, seed 20261124).
+
+  | Router | MMLU APGR | MMLU strong calls for half the gap | GSM8K APGR |
+  | --- | --- | --- | --- |
+  | Random | 0.500 | 50.0% | 0.500 |
+  | Learned, eight features, all evidence | 0.496 [0.478, 0.514] | 50.6% [47.9, 53.3] | 0.503 [0.465, 0.541] |
+  | Learned, evidence from the same MMLU subject | 0.677 [0.659, 0.698] | 26.2% [23.5, 29.0] | 0.503 [0.465, 0.541] |
+  | Oracle (upper bound) | 1.285 [1.242, 1.334] | 6.3% [5.9, 6.6] | 1.125 [1.046, 1.226] |
+
+  The eight content-free features alone carry no measurable per-request signal on these benchmarks. Pooled evidence
+  routes no better than chance; its interval includes 0.5. Evidence scoped to a meaningful domain does better: within
+  an MMLU subject, half the quality gap comes back with 26% of requests on the dearer model instead of 50%. So keep
+  outcomes per domain, and pass each domain its own `preference_history`, rather than pooling everything. These are
+  in-distribution results. RouteLLM's own tables train on Chatbot Arena data and test out of distribution, so the
+  numbers are not directly comparable. `bench/route-escalation/results.json` has every router, metric and interval.
 - **Scope.** The evidence lasts for the run, like the signing key. To carry it across runs, keep the `features` each
   answer returns together with your outcomes, and pass them back as `preference_history`. Quality judgments are
   yours: the engine learns from what you record and makes no model calls of its own. Without `escalation`, routing

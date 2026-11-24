@@ -1,0 +1,250 @@
+{
+  "method": "RouteLLM protocol (arXiv:2406.18665 Sec. 5); 5-fold CV over a seeded shuffle; ties averaged; in-distribution",
+  "seed": 20261124,
+  "data": {
+    "source": "https://github.com/lm-sys/RouteLLM",
+    "commit": "0b64fdafe049e596a3f5657c219329f24af24198",
+    "license": "Apache-2.0",
+    "weak": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "strong": "gpt-4-1106-preview"
+  },
+  "routers": {
+    "random": "every question scores 0.5",
+    "class_level": "smoothed class-level estimate, class = MMLU subject (GSM8K is one class): what a per-class rule can see",
+    "learned": "learned escalation as this package runs it: similarity-weighted outcomes from every training question",
+    "learned_within_class": "learned escalation with evidence restricted to the same class",
+    "oracle": "upper bound: strong only where it alone is right"
+  },
+  "results": [
+    {
+      "dataset": "mmlu",
+      "questions": 14042,
+      "weak_accuracy": 0.6808,
+      "strong_accuracy": 0.8058,
+      "strong_only_right": 2497,
+      "weak_only_right": 742,
+      "distinct_feature_vectors": 3921,
+      "routers": {
+        "random": {
+          "apgr": 0.5,
+          "cpt50": 0.5,
+          "cpt80": 0.8,
+          "pgr_at_20pct_strong": 0.2,
+          "distinct_scores": 1
+        },
+        "class_level": {
+          "apgr": 0.6766,
+          "cpt50": 0.2738,
+          "cpt80": 0.5734,
+          "pgr_at_20pct_strong": 0.4157,
+          "distinct_scores": 263
+        },
+        "learned": {
+          "apgr": 0.496,
+          "cpt50": 0.5062,
+          "cpt80": 0.7941,
+          "pgr_at_20pct_strong": 0.1771,
+          "distinct_scores": 93
+        },
+        "learned_within_class": {
+          "apgr": 0.6773,
+          "cpt50": 0.2616,
+          "cpt80": 0.5882,
+          "pgr_at_20pct_strong": 0.4102,
+          "distinct_scores": 1148
+        },
+        "oracle": {
+          "apgr": 1.2851,
+          "cpt50": 0.0625,
+          "cpt80": 0.1,
+          "pgr_at_20pct_strong": 1.4228,
+          "distinct_scores": 3
+        }
+      },
+      "bootstrap": {
+        "method": "paired percentile bootstrap over test questions, 10000 resamples, seed 20261124, cross-validated scores held fixed (the router-apgr suites' method)",
+        "apgr_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.6582,
+            0.6969
+          ],
+          "learned": [
+            0.4781,
+            0.5141
+          ],
+          "learned_within_class": [
+            0.6585,
+            0.6976
+          ],
+          "oracle": [
+            1.2422,
+            1.3338
+          ]
+        },
+        "cpt50_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.2446,
+            0.2996
+          ],
+          "learned": [
+            0.4786,
+            0.5333
+          ],
+          "learned_within_class": [
+            0.2348,
+            0.29
+          ],
+          "oracle": [
+            0.0587,
+            0.0664
+          ]
+        },
+        "paired_differences": [
+          {
+            "comparison": "learned, same subject minus learned, all evidence",
+            "a": "learned_within_class",
+            "b": "learned",
+            "apgr_difference_95ci": [
+              0.1555,
+              0.2075
+            ],
+            "share_of_resamples_a_better": 1
+          },
+          {
+            "comparison": "learned, same subject minus the class-level rate",
+            "a": "learned_within_class",
+            "b": "class_level",
+            "apgr_difference_95ci": [
+              -0.0028,
+              0.0043
+            ],
+            "share_of_resamples_a_better": 0.6474
+          }
+        ]
+      }
+    },
+    {
+      "dataset": "gsm8k",
+      "questions": 1319,
+      "weak_accuracy": 0.6384,
+      "strong_accuracy": 0.8567,
+      "strong_only_right": 383,
+      "weak_only_right": 95,
+      "distinct_feature_vectors": 540,
+      "routers": {
+        "random": {
+          "apgr": 0.5,
+          "cpt50": 0.5004,
+          "cpt80": 0.8006,
+          "pgr_at_20pct_strong": 0.2002,
+          "distinct_scores": 1
+        },
+        "class_level": {
+          "apgr": 0.4775,
+          "cpt50": 0.533,
+          "cpt80": 0.8287,
+          "pgr_at_20pct_strong": 0.184,
+          "distinct_scores": 5
+        },
+        "learned": {
+          "apgr": 0.5025,
+          "cpt50": 0.5057,
+          "cpt80": 0.8309,
+          "pgr_at_20pct_strong": 0.2453,
+          "distinct_scores": 101
+        },
+        "learned_within_class": {
+          "apgr": 0.5025,
+          "cpt50": 0.5057,
+          "cpt80": 0.8309,
+          "pgr_at_20pct_strong": 0.2453,
+          "distinct_scores": 101
+        },
+        "oracle": {
+          "apgr": 1.1249,
+          "cpt50": 0.1092,
+          "cpt80": 0.1751,
+          "pgr_at_20pct_strong": 0.9167,
+          "distinct_scores": 3
+        }
+      },
+      "bootstrap": {
+        "method": "paired percentile bootstrap over test questions, 10000 resamples, seed 20261124, cross-validated scores held fixed (the router-apgr suites' method)",
+        "apgr_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.4383,
+            0.5166
+          ],
+          "learned": [
+            0.4648,
+            0.5411
+          ],
+          "learned_within_class": [
+            0.4648,
+            0.5411
+          ],
+          "oracle": [
+            1.0458,
+            1.2257
+          ]
+        },
+        "cpt50_95ci": {
+          "random": [
+            0.5004,
+            0.5004
+          ],
+          "class_level": [
+            0.4685,
+            0.6012
+          ],
+          "learned": [
+            0.4382,
+            0.5754
+          ],
+          "learned_within_class": [
+            0.4382,
+            0.5754
+          ],
+          "oracle": [
+            0.094,
+            0.1243
+          ]
+        },
+        "paired_differences": [
+          {
+            "comparison": "learned, same subject minus learned, all evidence",
+            "a": "learned_within_class",
+            "b": "learned",
+            "apgr_difference_95ci": [
+              0,
+              0
+            ],
+            "share_of_resamples_a_better": 0
+          },
+          {
+            "comparison": "learned, same subject minus the class-level rate",
+            "a": "learned_within_class",
+            "b": "class_level",
+            "apgr_difference_95ci": [
+              -0.0116,
+              0.0634
+            ],
+            "share_of_resamples_a_better": 0.9063
+          }
+        ]
+      }
+    }
+  ]
+}
