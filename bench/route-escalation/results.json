@@ -11,8 +11,10 @@
   "routers": {
     "random": "every question scores 0.5",
     "class_level": "smoothed class-level estimate, class = MMLU subject (GSM8K is one class): what a per-class rule can see",
-    "learned": "learned escalation as this package runs it: similarity-weighted outcomes from every training question",
-    "learned_within_class": "learned escalation with evidence restricted to the same class",
+    "learned_v1": "1.3.0: similarity-weighted outcomes from every training question, eight features",
+    "learned": "1.4.0 without a scope: the same with sixteen features",
+    "learned_v1_scoped": "eight features, escalation.scope = the class (evidence from the same class only)",
+    "learned_scoped": "1.4.0 with escalation.scope = the class: sixteen features, evidence from the same class only",
     "oracle": "upper bound: strong only where it alone is right"
   },
   "results": [
@@ -23,7 +25,7 @@
       "strong_accuracy": 0.8058,
       "strong_only_right": 2497,
       "weak_only_right": 742,
-      "distinct_feature_vectors": 3921,
+      "distinct_feature_vectors": 13816,
       "routers": {
         "random": {
           "apgr": 0.5,
@@ -39,19 +41,33 @@
           "pgr_at_20pct_strong": 0.4157,
           "distinct_scores": 263
         },
-        "learned": {
+        "learned_v1": {
           "apgr": 0.496,
           "cpt50": 0.5062,
           "cpt80": 0.7941,
           "pgr_at_20pct_strong": 0.1771,
           "distinct_scores": 93
         },
-        "learned_within_class": {
+        "learned": {
+          "apgr": 0.6007,
+          "cpt50": 0.3417,
+          "cpt80": 0.7138,
+          "pgr_at_20pct_strong": 0.3441,
+          "distinct_scores": 134
+        },
+        "learned_v1_scoped": {
           "apgr": 0.6773,
           "cpt50": 0.2616,
           "cpt80": 0.5882,
           "pgr_at_20pct_strong": 0.4102,
           "distinct_scores": 1148
+        },
+        "learned_scoped": {
+          "apgr": 0.6803,
+          "cpt50": 0.2632,
+          "cpt80": 0.5666,
+          "pgr_at_20pct_strong": 0.4135,
+          "distinct_scores": 1706
         },
         "oracle": {
           "apgr": 1.2851,
@@ -60,6 +76,101 @@
           "pgr_at_20pct_strong": 1.4228,
           "distinct_scores": 3
         }
+      },
+      "bootstrap": {
+        "method": "paired percentile bootstrap over test questions, 10000 resamples, seed 20261124, cross-validated scores held fixed (the router-apgr suites' method)",
+        "apgr_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.6582,
+            0.6969
+          ],
+          "learned_v1": [
+            0.4781,
+            0.5141
+          ],
+          "learned": [
+            0.5822,
+            0.6195
+          ],
+          "learned_v1_scoped": [
+            0.6585,
+            0.6976
+          ],
+          "learned_scoped": [
+            0.6616,
+            0.7005
+          ],
+          "oracle": [
+            1.2422,
+            1.3338
+          ]
+        },
+        "cpt50_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.2446,
+            0.2996
+          ],
+          "learned_v1": [
+            0.4786,
+            0.5333
+          ],
+          "learned": [
+            0.3168,
+            0.3709
+          ],
+          "learned_v1_scoped": [
+            0.2348,
+            0.29
+          ],
+          "learned_scoped": [
+            0.2357,
+            0.2934
+          ],
+          "oracle": [
+            0.0587,
+            0.0664
+          ]
+        },
+        "paired_differences": [
+          {
+            "comparison": "1.4.0 with scope minus 1.3.0",
+            "a": "learned_scoped",
+            "b": "learned_v1",
+            "apgr_difference_95ci": [
+              0.1586,
+              0.2105
+            ],
+            "share_of_resamples_a_better": 1
+          },
+          {
+            "comparison": "sixteen minus eight features, no scope",
+            "a": "learned",
+            "b": "learned_v1",
+            "apgr_difference_95ci": [
+              0.0848,
+              0.1252
+            ],
+            "share_of_resamples_a_better": 1
+          },
+          {
+            "comparison": "1.4.0 with scope minus the scope rate alone",
+            "a": "learned_scoped",
+            "b": "class_level",
+            "apgr_difference_95ci": [
+              0.0016,
+              0.0059
+            ],
+            "share_of_resamples_a_better": 0.9997
+          }
+        ]
       }
     },
     {
@@ -69,7 +180,7 @@
       "strong_accuracy": 0.8567,
       "strong_only_right": 383,
       "weak_only_right": 95,
-      "distinct_feature_vectors": 540,
+      "distinct_feature_vectors": 1318,
       "routers": {
         "random": {
           "apgr": 0.5,
@@ -85,19 +196,33 @@
           "pgr_at_20pct_strong": 0.184,
           "distinct_scores": 5
         },
-        "learned": {
+        "learned_v1": {
           "apgr": 0.5025,
           "cpt50": 0.5057,
           "cpt80": 0.8309,
           "pgr_at_20pct_strong": 0.2453,
           "distinct_scores": 101
         },
-        "learned_within_class": {
+        "learned": {
+          "apgr": 0.5218,
+          "cpt50": 0.4647,
+          "cpt80": 0.8362,
+          "pgr_at_20pct_strong": 0.272,
+          "distinct_scores": 160
+        },
+        "learned_v1_scoped": {
           "apgr": 0.5025,
           "cpt50": 0.5057,
           "cpt80": 0.8309,
           "pgr_at_20pct_strong": 0.2453,
           "distinct_scores": 101
+        },
+        "learned_scoped": {
+          "apgr": 0.5218,
+          "cpt50": 0.4647,
+          "cpt80": 0.8362,
+          "pgr_at_20pct_strong": 0.272,
+          "distinct_scores": 160
         },
         "oracle": {
           "apgr": 1.1249,
@@ -106,6 +231,101 @@
           "pgr_at_20pct_strong": 0.9167,
           "distinct_scores": 3
         }
+      },
+      "bootstrap": {
+        "method": "paired percentile bootstrap over test questions, 10000 resamples, seed 20261124, cross-validated scores held fixed (the router-apgr suites' method)",
+        "apgr_95ci": {
+          "random": [
+            0.5,
+            0.5
+          ],
+          "class_level": [
+            0.4383,
+            0.5166
+          ],
+          "learned_v1": [
+            0.4648,
+            0.5411
+          ],
+          "learned": [
+            0.4822,
+            0.5622
+          ],
+          "learned_v1_scoped": [
+            0.4648,
+            0.5411
+          ],
+          "learned_scoped": [
+            0.4822,
+            0.5622
+          ],
+          "oracle": [
+            1.0458,
+            1.2257
+          ]
+        },
+        "cpt50_95ci": {
+          "random": [
+            0.5004,
+            0.5004
+          ],
+          "class_level": [
+            0.4685,
+            0.6012
+          ],
+          "learned_v1": [
+            0.4382,
+            0.5754
+          ],
+          "learned": [
+            0.3563,
+            0.5656
+          ],
+          "learned_v1_scoped": [
+            0.4382,
+            0.5754
+          ],
+          "learned_scoped": [
+            0.3563,
+            0.5656
+          ],
+          "oracle": [
+            0.094,
+            0.1243
+          ]
+        },
+        "paired_differences": [
+          {
+            "comparison": "1.4.0 with scope minus 1.3.0",
+            "a": "learned_scoped",
+            "b": "learned_v1",
+            "apgr_difference_95ci": [
+              -0.0017,
+              0.0413
+            ],
+            "share_of_resamples_a_better": 0.9641
+          },
+          {
+            "comparison": "sixteen minus eight features, no scope",
+            "a": "learned",
+            "b": "learned_v1",
+            "apgr_difference_95ci": [
+              -0.0017,
+              0.0413
+            ],
+            "share_of_resamples_a_better": 0.9641
+          },
+          {
+            "comparison": "1.4.0 with scope minus the scope rate alone",
+            "a": "learned_scoped",
+            "b": "class_level",
+            "apgr_difference_95ci": [
+              0.011,
+              0.0793
+            ],
+            "share_of_resamples_a_better": 0.9961
+          }
+        ]
       }
     }
   ]
