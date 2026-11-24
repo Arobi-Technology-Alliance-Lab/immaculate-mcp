@@ -23,7 +23,8 @@
  * merged. The lease ends at the deadline by the clock: the sweep runs on every call and on a timer, with no call
  * needed from a holder that went quiet. An IN_DOUBT effect is reconciled under a new lease (arobi_claim_effect).
  * Retries and compensations are attempts of their own, numbered and capped, and start only under a grant that is
- * neither revoked nor expired. A compensation starts only once the attempt it undoes has stopped running.
+ * neither revoked nor expired. A compensation starts on the machine's say-so only once the effect it undoes can no
+ * longer land; while it still could, only with a named person's approval, sealed with it.
  *
  * ACCEPTED is the human-review exit: a person closes the obligation of an IN_DOUBT or PARTIAL effect. It never
  * changes the outcome (an accepted IN_DOUBT effect is still unknown) and never lifts the fence: the key stays fenced
@@ -119,11 +120,6 @@ export class EffectLedger {
     return effect.steps.some((s) => !ok.has(s));
   }
 
-  /** Whether the attempt's own window is still open: before its deadline, with a step that has no ok receipt. */
-  attemptRunning(effect) {
-    return effect.state !== 'ABORTED' && this.now() < Date.parse(effect.deadline_at) && this.unreceipted(effect);
-  }
-
   /**
    * Whether this attempt could still land downstream. Never once it was fenced (ABORTED) or a compensation read back
    * the earlier state (COMPENSATED), nor when every step has an ok receipt. Otherwise the deadline ends it only if
@@ -159,6 +155,15 @@ export class EffectLedger {
 
   liveLease(effect) {
     return effect.lease && this.now() < effect.lease.until_ms ? effect.lease : null;
+  }
+
+  /** A named person's approval { approver, auth_method, approved_at } from the last 15 minutes, as sealed; else null. */
+  freshApproval(approval) {
+    if (!approval || typeof approval !== 'object' || !text(approval.approver, 200) || !text(approval.auth_method, 100)) return null;
+    const approvedMs = typeof approval.approved_at === 'string' ? Date.parse(approval.approved_at) : Number.NaN;
+    const nowMs = this.now();
+    if (!Number.isFinite(approvedMs) || approvedMs > nowMs || nowMs - approvedMs > APPROVAL_MAX_AGE_MS) return null;
+    return { approver: approval.approver, auth_method: approval.auth_method, approved_at: approval.approved_at };
   }
 
   markInDoubt(effect, cause, extra = {}) {
@@ -205,10 +210,7 @@ export class EffectLedger {
       return { reason_code: 'REVERSAL_CLASS_INVALID', reason: `reversal_class must be one of ${REVERSAL_CLASSES.join(', ')}.` };
     }
     if (reversal_class === 'IRREVERSIBLE') {
-      const approval = human_approval;
-      const approvedMs = approval && typeof approval.approved_at === 'string' ? Date.parse(approval.approved_at) : Number.NaN;
-      const fresh = Number.isFinite(approvedMs) && approvedMs <= this.now() && this.now() - approvedMs <= APPROVAL_MAX_AGE_MS;
-      if (!approval || !text(approval.approver, 200) || !text(approval.auth_method, 100) || !fresh) {
+      if (!this.freshApproval(human_approval)) {
         return {
           reason_code: 'IRREVERSIBLE_NEEDS_HUMAN_APPROVAL',
           reason: 'An IRREVERSIBLE effect needs human_approval { approver, auth_method, approved_at within the last 15 minutes } at authorization; it cannot be undone, so a person decides before it starts.',
@@ -245,7 +247,7 @@ export class EffectLedger {
     return null;
   }
 
-  begin(args, { compensates } = {}) {
+  begin(args, { compensates, humanApproval } = {}) {
     if (!args || typeof args !== 'object') throw new Error('Arguments object is required.');
     this.sweep();
     const {
@@ -284,6 +286,16 @@ export class EffectLedger {
     // No new work under a grant that was revoked or has expired (a revocation is this engine's stop).
     const stopped = this.grantStopped(auth);
     if (stopped) return this.refuse(stopped.reason_code, stopped.reason);
+    // The machine starts a compensation on its own only once the original can no longer land. While it still could, a
+    // late landing could overtake the compensation, so a named person decides (human_approval), and that is sealed.
+    let landableApproval = null;
+    if (original && this.mayStillLand(original)) {
+      landableApproval = this.freshApproval(humanApproval);
+      if (!landableApproval) {
+        const wait = original.deadline_enforced_downstream ? `, or wait for its deadline ${original.deadline_at}` : '';
+        return this.refuse('ATTEMPT_NOT_FENCED', `Effect ${original.effect_id} can still land (a step without an ok receipt may be in flight${original.deadline_enforced_downstream ? '' : ', and its deadline is not enforced downstream'}), and a compensation started now could be overtaken by it. Fence it with the downstream's CONSUMED_NOT_RELEASED receipt${wait}, or a person approves the compensation (human_approval within the last 15 minutes).`);
+      }
+    }
     if (!text(key, 200) || !EFFECT_KEY.test(key)) throw new Error('effect_key (on the start or its authorization) is required.');
     if (auth.effect_key !== undefined && auth.effect_key !== key) {
       return this.refuse('EFFECT_KEY_MISMATCH', `The authorization is for ${auth.effect_key}, not ${key}.`);
@@ -342,6 +354,8 @@ export class EffectLedger {
       deadline_enforced_downstream,
       cleanup_owner: owner,
       ...(compensates ? { compensates } : {}),
+      // A compensation started while the effect it undoes could still land: the risk a named person accepted.
+      ...(landableApproval ? { compensating_while_landable: true, human_approval: landableApproval } : {}),
     };
     // The plan is fixed, and its digest sealed, before anything runs; every close names it.
     const plan_digest = this.digest(plan);
@@ -519,6 +533,9 @@ export class EffectLedger {
         result.compensated_record = this.seal('EFFECT_COMPENSATED', {
           effect_id: target.effect_id, effect_key: target.effect_key, attempt: target.attempt, prior_state: prior,
           compensation_effect_id: effect.effect_id, compensation_attempt: effect.attempt,
+          ...(effect.compensating_while_landable
+            ? { compensating_while_landable: true, approved_by: effect.human_approval.approver }
+            : {}),
         });
         result.compensated = this.view(target);
       }
@@ -580,14 +597,8 @@ export class EffectLedger {
     }
     const live = this.liveLease(original);
     if (live) return this.refuse('EFFECT_LEASED', `Effect ${original.effect_id} is held (${live.purpose}) until ${live.until}; one holder at a time.`);
-    // The compensation waits until the attempt's own window has closed (every step receipted ok, or its deadline
-    // passed). Where the downstream enforces the deadline nothing can land after that; where it does not, a call in
-    // flight still might, and the compensation's read-back is the evidence that the earlier state was restored.
-    if (this.attemptRunning(original)) {
-      return this.refuse('ATTEMPT_NOT_FENCED', `Effect ${original.effect_id} is still running until its deadline ${original.deadline_at} (a step without an ok receipt may be in flight); a compensation started now could be overtaken by a late landing.`);
-    }
-    const { effect_id: _original, ...start } = args;
-    return this.begin({ ...start, effect_key: original.effect_key }, { compensates: original.effect_id });
+    const { effect_id: _original, human_approval, ...start } = args;
+    return this.begin({ ...start, effect_key: original.effect_key }, { compensates: original.effect_id, humanApproval: human_approval });
   }
 
   /** A person accepts an effect as it stands (IN_DOUBT or PARTIAL): sealed, with who and how they authenticated. */
@@ -683,6 +694,7 @@ export class EffectLedger {
       lease: effect.lease ? this.leaseView(effect.lease, false) : null,
       reconcile_claims: effect.claims,
       ...(effect.compensates ? { compensates: effect.compensates } : {}),
+      ...(effect.compensating_while_landable ? { compensating_while_landable: true, human_approval: { ...effect.human_approval } } : {}),
       ...(effect.compensated_by ? { compensated_by: effect.compensated_by } : {}),
       ...(effect.accepted_from ? { accepted_from: effect.accepted_from } : {}),
       ...(effect.in_doubt_at ? { in_doubt_at: effect.in_doubt_at, in_doubt_cause: effect.in_doubt_cause } : {}),

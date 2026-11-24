@@ -95,7 +95,7 @@ test('2. authorizing again on that effect key is DENIED, and the denial names th
 
 test('3. a compensation whose read-back shows the first state makes the effect COMPENSATED, and the chain verifies offline (and refuses tampering)', () => {
   const { clock, engine, grant, authorize, start, step, readBack, close } = setup();
-  const original = start(authorize({ effect_key: 'deploy:site-a' }));
+  const original = start(authorize({ effect_key: 'deploy:site-a' }), { deadline_enforced_downstream: true });
   const originalId = original.effect.effect_id;
   step(original, 'upload');
   clock.t += 601_000;
@@ -359,7 +359,7 @@ test('rule 3. attempt fencing: nothing the first attempt holds changes the retry
 
 test('rule 4. no new work under a stopped grant: a revoked or expired grant starts no effect and no compensation, and in-flight work is still observed', () => {
   const { clock, engine, grant, authorize, start, step, readBack, close, claim } = setup();
-  const original = start(authorize({ effect_key: 'deploy:site-a' }));
+  const original = start(authorize({ effect_key: 'deploy:site-a' }), { deadline_enforced_downstream: true });
   step(original, 'upload');
   const inFlight = start(authorize({ effect_key: 'deploy:site-c' }), { idempotency_key: 'deploy-c-1', deadline_sec: 3_600 });
   const spare = authorize({ effect_key: 'deploy:site-b' });
@@ -425,10 +425,10 @@ test('rule 5. deadlines are the clock\'s: the timer marks a quiet effect IN_DOUB
 
 test('rule 6. recovery is bounded: an unsettled compensation is IN_DOUBT and blocks the next, three compensations at most, five claims at most', () => {
   const { clock, engine, grant, authorize, start, step, readBack, close, claim, accept } = setup();
-  const original = start(authorize({ effect_key: 'deploy:site-a' }));
+  const original = start(authorize({ effect_key: 'deploy:site-a' }), { deadline_enforced_downstream: true });
   const originalId = original.effect.effect_id;
   step(original, 'upload');
-  // A compensation starts only once the effect can no longer land: here, after its deadline.
+  // A compensation starts on the engine's say-so only once the effect can no longer land: here, after its deadline.
   const compensateOnce = (idempotency_key) => {
     const auth = engine.authorize({
       route_grant: grant, action: 'revert.deploy', consequence_tier: 'medium', principal: 'ops-lead',
@@ -600,7 +600,7 @@ test('the deadline fences an attempt only when the downstream enforces it', () =
   const undone = start(authorize({ effect_key: 'deploy:site-c' }), { idempotency_key: 'deploy-c-1' });
   step(undone, 'upload');
   assert.equal(close(undone).outcome, 'IN_DOUBT');
-  const compensation = (idempotency_key) => {
+  const compensation = (idempotency_key, human_approval) => {
     const auth = engine.authorize({
       route_grant: grant, action: 'revert.deploy', consequence_tier: 'medium', principal: 'ops-lead',
       effect_key: 'deploy:site-c', compensates_effect_id: undone.effect.effect_id,
@@ -608,15 +608,29 @@ test('the deadline fences an attempt only when the downstream enforces it', () =
     return engine.compensateEffect({
       effect_id: undone.effect.effect_id, authorization_record_hash: auth.record.record_hash, steps: ['restore-previous'],
       postcondition: 'site-c serves release 41', reversal: { class: 'COMPENSABLE', compensation: 'deploy 42 again' },
-      deadline_sec: 60, idempotency_key,
+      deadline_sec: 60, idempotency_key, ...(human_approval ? { human_approval } : {}),
     });
   };
-  assert.equal(compensation('revert-c-0').reason_code, 'ATTEMPT_NOT_FENCED', 'it is still running until its deadline');
   clock.t += 601_000;
-  const comp = compensation('revert-c-1');
+  // Past its deadline it may still land, so the engine does not start a compensation on its own...
+  const refused = compensation('revert-c-0');
+  assert.equal(refused.reason_code, 'ATTEMPT_NOT_FENCED');
+  assert.match(refused.reason, /CONSUMED_NOT_RELEASED receipt, or a person approves/);
+  const stale = { approver: 'ops-lead', auth_method: 'webauthn', approved_at: new Date(clock.t - 16 * 60_000).toISOString() };
+  assert.equal(compensation('revert-c-1', stale).reason_code, 'ATTEMPT_NOT_FENCED', 'an approval older than 15 minutes');
+  // ...a named person decides, and that is sealed with the compensation and with its result.
+  const approval = { approver: 'ops-lead', auth_method: 'webauthn', approved_at: new Date(clock.t - 60_000).toISOString() };
+  const comp = compensation('revert-c-2', approval);
   assert.equal(comp.status, 'STARTED');
+  assert.equal(comp.effect.compensating_while_landable, true);
+  assert.equal(comp.record.payload.compensating_while_landable, true);
+  assert.deepEqual(comp.record.payload.human_approval, approval);
   step(comp, 'restore-previous');
-  assert.equal(close(comp, readBack({ postcondition_met: true, downstream_changed: true })).outcome, 'COMMITTED');
+  const restored = close(comp, readBack({ postcondition_met: true, downstream_changed: true }));
+  assert.equal(restored.outcome, 'COMMITTED');
+  assert.equal(restored.compensated.state, 'COMPENSATED');
+  assert.equal(restored.compensated_record.payload.compensating_while_landable, true);
+  assert.equal(restored.compensated_record.payload.approved_by, 'ops-lead');
   assert.equal(authorize({ effect_key: 'deploy:site-c' }).decision, 'GRANTED');
 
   // Enforced: the deadline fences it (test 6 has both sides of that fence).

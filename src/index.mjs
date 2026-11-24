@@ -391,7 +391,7 @@ export const TOOL_DEFINITIONS = [
     title: 'Start the compensation of an effect',
     annotations: { title: 'Start the compensation of an effect', ...APPENDS_LOCAL_CHAIN },
     description:
-      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it, with its own attempt number, lease and deadline, under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. It starts only once the original has stopped running (every step has an ok receipt, or its deadline has passed), never while the original is held by a lease, and never under a revoked or expired grant. If the original\'s deadline is not enforced downstream, a call of it in flight may still land after the compensation. A compensation that does not settle is IN_DOUBT like any effect, and no other compensation of the same effect starts until it is settled; at most 3 per effect. An IRREVERSIBLE effect cannot be compensated, only accepted.',
+      'Start the compensation of an IN_DOUBT, PARTIAL or COMMITTED effect as an effect of its own on the same key, linked to it, with its own attempt number, lease and deadline, under its own GRANTED authorization (authorize it with compensates_effect_id). Record its steps, then close it: when its read-back shows the earlier state (its postcondition), the original becomes COMPENSATED. It starts on its own only once the original can no longer land (every step has an ok receipt, or its deadline has passed and the downstream enforces it); while the original could still land, only with human_approval from a named person, sealed as compensating_while_landable, because a late landing may overtake it. Never while the original is held by a lease, and never under a revoked or expired grant. A compensation that does not settle is IN_DOUBT like any effect, and no other compensation of the same effect starts until it is settled; at most 3 per effect. An IRREVERSIBLE effect cannot be compensated, only accepted.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -411,6 +411,17 @@ export const TOOL_DEFINITIONS = [
         },
         deadline_sec: { type: 'integer', description: 'Seconds from now by which the compensation is closed.' },
         idempotency_key: { type: 'string', description: 'Your key for the compensation (8 to 200 characters).' },
+        deadline_enforced_downstream: { type: 'boolean', description: 'True only if the downstream refuses the compensation after its deadline (default false).' },
+        human_approval: {
+          type: 'object',
+          description: 'Needed only while the effect it undoes could still land: the person who decided to compensate it anyway. The local engine records what you report; it does not verify the person.',
+          properties: {
+            approver: { type: 'string', description: 'Who approved it.' },
+            auth_method: { type: 'string', description: 'How they authenticated.' },
+            approved_at: { type: 'string', description: 'When (ISO 8601), within the last 15 minutes.' },
+          },
+          required: ['approver', 'auth_method', 'approved_at'],
+        },
       },
       required: ['effect_id', 'authorization_record_hash', 'steps', 'postcondition', 'reversal', 'deadline_sec', 'idempotency_key'],
     },

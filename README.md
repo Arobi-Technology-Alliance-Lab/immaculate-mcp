@@ -191,10 +191,12 @@ Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
   - A compensation is itself an authorized effect on the same key, with its own attempt number, lease and deadline.
     Authorize it with `compensates_effect_id`, the one authorization an open effect admits on its key. When the
     compensation's read-back shows the earlier state, the original becomes **COMPENSATED**.
-  - A compensation starts only once the original has stopped running (every step has an ok receipt, or its
-    deadline has passed), never while the original holds a live lease. If the original's deadline is not enforced
-    downstream, a call of it still in flight may land after the compensation; the compensation's read-back is the
-    evidence that the earlier state was restored.
+  - A compensation starts on the engine's own say-so only once the original can no longer land: every step has an
+    ok receipt, or its deadline has passed and the downstream enforces it. While the original could still land
+    (always, past the deadline, when the downstream does not enforce it), a compensation starts only with
+    `human_approval` from a named person in the last 15 minutes, sealed as `compensating_while_landable` in the
+    compensation's start and in `EFFECT_COMPENSATED`. A call of the original still in flight may land after the
+    compensation; that is the risk the named person accepted. Never while the original holds a live lease.
   - A compensation that does not settle is IN_DOUBT like any effect. No other compensation of the same effect starts
     until it is settled, and there are at most 3 per effect.
   - No effect or compensation starts under a grant that was revoked or has expired; work already in flight is still
