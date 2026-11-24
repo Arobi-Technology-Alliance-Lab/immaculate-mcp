@@ -324,8 +324,9 @@ writeFileSync(join(here, 'results.json'), `${JSON.stringify(results, null, 2)}\n
 for (const r of results.results) {
   console.log(`${r.dataset}: n=${r.questions} weak=${r.weak_accuracy} strong=${r.strong_accuracy} distinct feature vectors=${r.distinct_feature_vectors}`);
   for (const [name, m] of Object.entries(r.routers)) {
-    const ci = r.bootstrap.apgr_95ci[name];
-    console.log(`  ${name.padEnd(22)} APGR ${m.apgr}${ci ? ` [${ci[0]}, ${ci[1]}]` : ''}  CPT(50%) ${m.cpt50}  CPT(80%) ${m.cpt80}  PGR@20% ${m.pgr_at_20pct_strong}`);
+    const a = r.bootstrap.apgr_95ci[name];
+    const c = r.bootstrap.cpt50_95ci[name];
+    console.log(`  ${name.padEnd(22)} APGR ${m.apgr}${a ? ` [${a[0]}, ${a[1]}]` : ''}  CPT(50%) ${m.cpt50}${c ? ` [${c[0]}, ${c[1]}]` : ''}  CPT(80%) ${m.cpt80}  PGR@20% ${m.pgr_at_20pct_strong}`);
   }
   for (const d of r.bootstrap.paired_differences) {
     console.log(`  ${d.comparison}: APGR difference 95% CI [${d.apgr_difference_95ci[0]}, ${d.apgr_difference_95ci[1]}], better in ${d.share_of_resamples_a_better} of resamples`);
