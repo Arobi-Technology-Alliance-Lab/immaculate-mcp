@@ -19,23 +19,25 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 
 ---
 
-## Included Tools (Local Execution)
+## Included Tools & Surface Matrix (Local Engine vs. Hosted Cloud Connector)
 
-| Tool | Purpose |
-| :--- | :--- |
-| `arobi_route_grant` | Seals WHO granted WHAT authority to WHICH workflow (`scope.actions`, `scope.category_caps`, `attenuation`, `expires_at`) with an Ed25519 signature and hash-chained `ROUTE_GRANT` record. |
-| `arobi_revoke_grant` | Ends a grant this server sealed before it expires: seals a hash-chained `ROUTE_REVOKE` record, after which `arobi_authorize` **DENIES** the grant (`GRANT_REVOKED`). A grant that is unsigned, signed by another key, sealed with `revocable: false`, expired or already revoked is **REFUSED** with a reason code, and nothing is sealed. |
-| `arobi_authorize` | Verifies that the grant was sealed by this server and not revoked (an unsigned grant, one signed with any other key, or a revoked one is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
-| `arobi_classify_and_route` | Classifies prompt complexity, filters capable candidates, picks the lowest-cost capable model or applies an explicit `quality_exception` uplift rule, detects repeated work, and optionally seals a `ROUTING_DECISION` record. With `escalation` set, it pays for a dearer capable candidate only when the predicted chance it beats the cheapest capable one **on this request** reaches your cost threshold (learned escalation, below). |
-| `arobi_record_route_outcome` | Teaches learned escalation: records how a routed request turned out (`quality` 0 to 1, or `ok`) and, optionally, how it compared with another candidate on the same request. Seals a hash-chained `ROUTE_OUTCOME` record and returns the run's routing stats (escalated share, mean quality per candidate). |
-| `arobi_begin_effect` | Starts the effect a **GRANTED** authorization allows and seals `EFFECT_STARTED`. It names the steps, the postcondition a read-back must show, how the effect is undone, a deadline and the cleanup owner, and it returns the attempt number and a lease (partly-run actions, below). |
-| `arobi_record_step` | Seals the receipt of one declared step under the attempt's lease: ok or failed, with an optional evidence digest. |
-| `arobi_close_effect` | Settles an attempt on its read-back. The engine decides the outcome: **COMMITTED**, **ABORTED** or **PARTIAL** on evidence, **IN_DOUBT** without it. |
-| `arobi_claim_effect` | Takes over an **IN_DOUBT** effect under a new lease, to read back its outcome and close it. |
-| `arobi_list_open_effects` | Lists every open effect (started, **IN_DOUBT** or **PARTIAL**) with its owner, age, deadline, lease and the receipts that landed. |
-| `arobi_compensate` | Starts the compensation of an effect: an authorized effect of its own, linked to the one it undoes, with its own attempt number and lease. |
-| `arobi_accept_effect` | A person accepts an **IN_DOUBT** or **PARTIAL** effect as it stands, and `EFFECT_ACCEPTED` is sealed. |
-| `arobi_verify_chain` | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, checks that they are plain data numbered from 1 with no gap, repeat or reordering, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
+To eliminate version ambiguity across MCP directories (Official MCP Registry, Glama, MCP Servers, and TensorBlock), here is the exact tool availability across the **Local Offline Engine (`v1.5.0`, 13 tools)** and the **Hosted Streamable HTTP Connector (`https://aura-genesis.org/api/v1/mcp`, 5 shared core tools)**:
+
+| Tool | Hosted HTTP (`v1.1.0+`) | Local Engine (`v1.5.0`) | Purpose |
+| :--- | :---: | :---: | :--- |
+| `arobi_route_grant` | Yes | Yes | Seals WHO granted WHAT authority to WHICH workflow (`scope.actions`, `scope.category_caps`, `attenuation`, `expires_at`) with an Ed25519 signature and hash-chained `ROUTE_GRANT` record. |
+| `arobi_revoke_grant` | Yes (`1.1.0+`) | Yes (`1.2.0+`) | Ends a grant this server sealed before it expires: seals a hash-chained `ROUTE_REVOKE` record, after which `arobi_authorize` **DENIES** the grant (`GRANT_REVOKED`). A grant that is unsigned, signed by another key, sealed with `revocable: false`, expired or already revoked is **REFUSED** with a reason code, and nothing is sealed. |
+| `arobi_authorize` | Yes | Yes | Verifies that the grant was sealed by this server and not revoked (an unsigned grant, one signed with any other key, or a revoked one is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
+| `arobi_classify_and_route` | Yes | Yes (`+ learned escalation 1.3.0+`) | Classifies prompt complexity, filters capable candidates, picks the lowest-cost capable model or applies an explicit `quality_exception` uplift rule, detects repeated work, and optionally seals a `ROUTING_DECISION` record. With `escalation` set (local `1.3.0+`), it pays for a dearer capable candidate only when the predicted chance it beats the cheapest capable one **on this request** reaches your cost threshold (learned escalation, below). |
+| `arobi_verify_chain` | Yes | Yes | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, checks that they are plain data numbered from 1 with no gap, repeat or reordering, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
+| `arobi_record_route_outcome` | Planned | Yes (`1.3.0+`) | Teaches learned escalation: records how a routed request turned out (`quality` 0 to 1, or `ok`) and, optionally, how it compared with another candidate on the same request. Seals a hash-chained `ROUTE_OUTCOME` record and returns the run's routing stats (escalated share, mean quality per candidate). |
+| `arobi_begin_effect` | Planned | Yes (`1.5.0+`) | Starts the effect a **GRANTED** authorization allows and seals `EFFECT_STARTED`. It names the steps, the postcondition a read-back must show, how the effect is undone, a deadline and the cleanup owner, and it returns the attempt number and a lease (partly-run actions, below). |
+| `arobi_record_step` | Planned | Yes (`1.5.0+`) | Seals the receipt of one declared step under the attempt's lease: ok or failed, with an optional evidence digest. |
+| `arobi_close_effect` | Planned | Yes (`1.5.0+`) | Settles an attempt on its read-back. The engine decides the outcome: **COMMITTED**, **ABORTED** or **PARTIAL** on evidence, **IN_DOUBT** without it. |
+| `arobi_claim_effect` | Planned | Yes (`1.5.0+`) | Takes over an **IN_DOUBT** effect under a new lease, to read back its outcome and close it. |
+| `arobi_list_open_effects` | Planned | Yes (`1.5.0+`) | Lists every open effect (started, **IN_DOUBT** or **PARTIAL**) with its owner, age, deadline, lease and the receipts that landed. |
+| `arobi_compensate` | Planned | Yes (`1.5.0+`) | Starts the compensation of an effect: an authorized effect of its own, linked to the one it undoes, with its own attempt number and lease. |
+| `arobi_accept_effect` | Planned | Yes (`1.5.0+`) | A person accepts an **IN_DOUBT** or **PARTIAL** effect as it stands, and `EFFECT_ACCEPTED` is sealed. |
 
 ### Learned escalation (after RouteLLM)
 
@@ -281,7 +283,7 @@ gnosh mcp add -s user arobi-immaculate -- node /absolute/path/to/immaculate-mcp/
 gnosh mcp list
 ```
 
-`gnosh mcp list` should show the server as connected with five tools. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
+`gnosh mcp list` shows the local engine (`1.5.0`) connected with **13 tools** (the 5 shared core tools plus `arobi_record_route_outcome` and the 7 partly-run effect tools), whereas the hosted connector (`https://aura-genesis.org/api/v1/mcp`, `1.1.0`) exposes the **5 shared core tools**. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
 
 To use the hosted connector, pipe the entry in on standard input, so the key never appears on the command line:
 
@@ -292,9 +294,19 @@ echo '{"type": "http", "url": "https://aura-genesis.org/api/v1/mcp", "headers": 
 
 The single quotes keep `${AROBI_TENANT_KEY}` as written. gnosh fills it in from your environment when it connects, so the key itself stays out of the file too.
 
-In a gnosh session the tools are named `mcp__arobi-immaculate__arobi_authorize`, `mcp__arobi-immaculate__arobi_route_grant`, `mcp__arobi-immaculate__arobi_revoke_grant`, `mcp__arobi-immaculate__arobi_classify_and_route` and `mcp__arobi-immaculate__arobi_verify_chain`. gnosh's `/mcp` shows each server's state.
+In a gnosh session each tool is prefixed `mcp__arobi-immaculate__<tool_name>` (all 13 tools on the local engine, or the 5 core tools `arobi_authorize`, `arobi_route_grant`, `arobi_revoke_grant`, `arobi_classify_and_route`, and `arobi_verify_chain` on `arobi-immaculate-cloud`). gnosh's `/mcp` shows each server's state.
 
-Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux (Ubuntu 24.04): after the `add` above, `gnosh mcp list` showed `arobi-immaculate` as connected with its four tools (version 1.1.0; 1.2.0 adds `arobi_revoke_grant` as the fifth), and the hosted connector connected the same way, with gnosh's `mcp.json` keeping the key as `${AROBI_TENANT_KEY}`. gnosh runs on Linux and macOS.
+Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux (Ubuntu 24.04) and updated through local engine `1.5.0` (13 tools; hosted connector at `1.1.0` with 5 tools), with gnosh's `mcp.json` keeping the key as `${AROBI_TENANT_KEY}`. gnosh runs on Linux and macOS.
+
+---
+
+## Sandbox & Cybersecurity Transparency Alignment (OpenShell / SAFE Principles)
+
+Immaculate MCP is designed to pair directly with isolated agent execution sandboxes (such as containerized shells, NVIDIA OpenShell-style governed sandboxes, and `Ullumii` / `HUE` sandboxes) under transparent cybersecurity boundaries:
+
+1. **Deterministic Pre-Action Authority (`arobi_route_grant` + `arobi_authorize`):** Authorization decisions are deterministic and independent of LLM reasoning — separating advisory model output from execution authority, and requiring recent human approval on `IRREVERSIBLE` effects.
+2. **Content-Free Telemetry & Zero Prompt Retention:** Routing features are reduced to 16 scalar structural counts/shares; raw prompt text and lease tokens are never persisted in sealed records.
+3. **Cryptographic Tamper Evidence & Explicit Trust Boundary:** Every grant, revocation, authorization, routing decision, and effect transition is Ed25519-signed and SHA-256 hash-chained (`arobi_verify_chain`), while openly declaring the boundary between operator-held local signing keys and multi-tenant hosted ledgers.
 
 ---
 
