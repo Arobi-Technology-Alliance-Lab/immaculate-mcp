@@ -21,15 +21,16 @@ It executes **100% locally and offline** using Node.js built-in `node:crypto` (E
 
 ## Included Tools & Surface Matrix (Local Engine vs. Hosted Cloud Connector)
 
-To eliminate version ambiguity across MCP directories (Official MCP Registry, Glama, MCP Servers, and TensorBlock), here is the exact tool availability across the **Local Offline Engine (`v1.5.0`, 13 tools)** and the **Hosted Streamable HTTP Connector (`https://aura-genesis.org/api/v1/mcp`, 5 shared core tools)**:
+To eliminate version ambiguity across MCP directories (Official MCP Registry, Glama, MCP Servers, and TensorBlock), here is the exact tool availability across the **Local Offline Engine (`v1.5.0`, 13 tools)** and the **Hosted Streamable HTTP Connector (`https://aura-genesis.org/api/v1/mcp`, `v1.4.0`, 6 tools: the 5 shared core tools plus `arobi_list_records`)**:
 
-| Tool | Hosted HTTP (`v1.1.0+`) | Local Engine (`v1.5.0`) | Purpose |
+| Tool | Hosted HTTP (`v1.4.0`) | Local Engine (`v1.5.0`) | Purpose |
 | :--- | :---: | :---: | :--- |
 | `arobi_route_grant` | Yes | Yes | Seals WHO granted WHAT authority to WHICH workflow (`scope.actions`, `scope.category_caps`, `attenuation`, `expires_at`) with an Ed25519 signature and hash-chained `ROUTE_GRANT` record. |
 | `arobi_revoke_grant` | Yes (`1.1.0+`) | Yes (`1.2.0+`) | Ends a grant this server sealed before it expires: seals a hash-chained `ROUTE_REVOKE` record, after which `arobi_authorize` **DENIES** the grant (`GRANT_REVOKED`). A grant that is unsigned, signed by another key, sealed with `revocable: false`, expired or already revoked is **REFUSED** with a reason code, and nothing is sealed. |
 | `arobi_authorize` | Yes | Yes | Verifies that the grant was sealed by this server and not revoked (an unsigned grant, one signed with any other key, or a revoked one is **DENIED**), then its expiry, action allowlist, category caps, and consequence-tier auth freshness before execution — returning **GRANTED**, **DENIED**, or **ESCALATED** with a hash-chained `AUTHORIZATION` record. |
 | `arobi_classify_and_route` | Yes | Yes (`+ learned escalation 1.3.0+`) | Classifies prompt complexity, filters capable candidates, picks the lowest-cost capable model or applies an explicit `quality_exception` uplift rule, detects repeated work, and optionally seals a `ROUTING_DECISION` record. With `escalation` set (local `1.3.0+`), it pays for a dearer capable candidate only when the predicted chance it beats the cheapest capable one **on this request** reaches your cost threshold (learned escalation, below). |
 | `arobi_verify_chain` | Yes | Yes | Re-derives canonical SHA-256 `prev_hash` / `record_hash` continuity and Ed25519 signatures across an ordered array of records, checks that they are plain data numbered from 1 with no gap, repeat or reordering, requires one signer for the whole chain (and, with `expected_signer_kid`, the signer you trust), and pinpoints the first broken index and the reason. |
+| `arobi_list_records` | Yes (`1.4.0+`) | No | Lists your own workspace's sealed records, newest first (filter by `kind`, `from`/`to`, paged by `limit`/`cursor`): each record's id, kind, SHA-256 digest, when it was sealed and its block in the Arobi ledger. Digests and kinds only, never a record's content; read-only, and it verifies nothing (use `arobi_verify_chain` for that). |
 | `arobi_record_route_outcome` | Planned | Yes (`1.3.0+`) | Teaches learned escalation: records how a routed request turned out (`quality` 0 to 1, or `ok`) and, optionally, how it compared with another candidate on the same request. Seals a hash-chained `ROUTE_OUTCOME` record and returns the run's routing stats (escalated share, mean quality per candidate). |
 | `arobi_begin_effect` | Planned | Yes (`1.5.0+`) | Starts the effect a **GRANTED** authorization allows and seals `EFFECT_STARTED`. It names the steps, the postcondition a read-back must show, how the effect is undone, a deadline and the cleanup owner, and it returns the attempt number and a lease (partly-run actions, below). |
 | `arobi_record_step` | Planned | Yes (`1.5.0+`) | Seals the receipt of one declared step under the attempt's lease: ok or failed, with an optional evidence digest. |
@@ -229,19 +230,19 @@ Anything less leaves it IN_DOUBT: open, owned, and its key still fenced.
 - **Not an independent check.** Whoever runs the local server holds its key and controls what it is told. For decisions that must be checked by someone other than the agent's operator, use the hosted service.
 - **Tools.** Both have `arobi_route_grant`, `arobi_revoke_grant`, `arobi_authorize`, `arobi_classify_and_route` and
   `arobi_verify_chain`. The hosted service added `arobi_revoke_grant` in its version 1.1.0 (2026-11-21) and the local
-  engine in 1.2.0. Learned escalation and `arobi_record_route_outcome` are in the local engine from 1.3.0 and not in
+  engine in 1.2.0. The hosted service added `arobi_list_records` in 1.4.0: it lists your workspace's sealed records
+  (digests and kinds, never content); the local engine has no list, since its records come back with each decision and
+  last for the run. Learned escalation and `arobi_record_route_outcome` are in the local engine from 1.3.0 and not in
   the hosted service yet. The effect tools (partly-run actions) are in the local engine from 1.5.0 and not in the
   hosted service yet. A local revocation, like the local key, lasts for the run that made it:
-  a local grant ends when it is revoked, when it expires, or when the run that sealed it stops. Neither one lists or
-  searches sealed records yet: records come back with each decision, and the hosted service keeps them in your
-  workspace's ledger.
+  a local grant ends when it is revoked, when it expires, or when the run that sealed it stops.
 - **Versions.** The two have their own version numbers.
   - `package.json` and the local engine's `serverInfo` carry the local engine's version.
   - `server.json` is the Official MCP Registry entry for the hosted endpoint. Its version is the one the hosted
     endpoint reports in its own `serverInfo`, and the publish workflow refuses any other.
   - The registry's 1.2.0 and 1.3.0 entries were published with local-engine releases while the hosted endpoint still
-    reported 1.1.0. They describe the same endpoint, URL and header. The hosted endpoint's next release takes the next
-    number, and the two agree again.
+    reported 1.1.0. They describe the same endpoint, URL and header. The hosted endpoint now reports 1.4.0, and
+    `server.json` says 1.4.0 to match; the registry shows 1.4.0 once that version is published.
 
 ---
 
@@ -283,7 +284,7 @@ gnosh mcp add -s user arobi-immaculate -- node /absolute/path/to/immaculate-mcp/
 gnosh mcp list
 ```
 
-`gnosh mcp list` shows the local engine (`1.5.0`) connected with **13 tools** (the 5 shared core tools plus `arobi_record_route_outcome` and the 7 partly-run effect tools), whereas the hosted connector (`https://aura-genesis.org/api/v1/mcp`, `1.1.0`) exposes the **5 shared core tools**. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
+`gnosh mcp list` shows the local engine (`1.5.0`) connected with **13 tools** (the 5 shared core tools plus `arobi_record_route_outcome` and the 7 partly-run effect tools), whereas the hosted connector (`https://aura-genesis.org/api/v1/mcp`, `1.4.0`) exposes **6 tools**: the 5 shared core tools plus `arobi_list_records`. Without `-s user` the server is added for the current folder only (gnosh's local scope). With `-s project` it goes into the project's `.mcp.json`, which gnosh reads once you trust the folder.
 
 To use the hosted connector, pipe the entry in on standard input, so the key never appears on the command line:
 
@@ -294,7 +295,7 @@ echo '{"type": "http", "url": "https://aura-genesis.org/api/v1/mcp", "headers": 
 
 The single quotes keep `${AROBI_TENANT_KEY}` as written. gnosh fills it in from your environment when it connects, so the key itself stays out of the file too.
 
-In a gnosh session each tool is prefixed `mcp__arobi-immaculate__<tool_name>` (all 13 tools on the local engine, or the 5 core tools `arobi_authorize`, `arobi_route_grant`, `arobi_revoke_grant`, `arobi_classify_and_route`, and `arobi_verify_chain` on `arobi-immaculate-cloud`). gnosh's `/mcp` shows each server's state.
+In a gnosh session each tool is prefixed `mcp__arobi-immaculate__<tool_name>` (all 13 tools on the local engine, or the 6 hosted tools `arobi_authorize`, `arobi_route_grant`, `arobi_revoke_grant`, `arobi_classify_and_route`, `arobi_verify_chain` and `arobi_list_records` on `arobi-immaculate-cloud`). gnosh's `/mcp` shows each server's state.
 
 Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux (Ubuntu 24.04) and updated through local engine `1.5.0` (13 tools; hosted connector at `1.1.0` with 5 tools), with gnosh's `mcp.json` keeping the key as `${AROBI_TENANT_KEY}`. gnosh runs on Linux and macOS.
 
