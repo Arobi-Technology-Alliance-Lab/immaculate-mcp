@@ -301,13 +301,13 @@ Checked on 2026-11-21 with gnosh built from its main branch (`b09df22`) on Linux
 
 ---
 
-## Sandbox & Cybersecurity Transparency Alignment (OpenShell / SAFE Principles)
+## Sandboxes, OpenShell and SAFE
 
-Immaculate MCP is designed to pair directly with isolated agent execution sandboxes (such as containerized shells, NVIDIA OpenShell-style governed sandboxes, and `Ullumii` / `HUE` sandboxes) under transparent cybersecurity boundaries:
+Immaculate MCP decides before an agent acts, so it pairs with sandboxes that run agents in isolation: containerized shells, NVIDIA OpenShell, and the `Ullumii` and `HUE` sandboxes.
 
-1. **Deterministic Pre-Action Authority (`arobi_route_grant` + `arobi_authorize`):** Authorization decisions are deterministic and independent of LLM reasoning — separating advisory model output from execution authority, and requiring recent human approval on `IRREVERSIBLE` effects.
-2. **Content-Free Telemetry & Zero Prompt Retention:** Routing features are reduced to 16 scalar structural counts/shares; raw prompt text and lease tokens are never persisted in sealed records.
-3. **Cryptographic Tamper Evidence & Explicit Trust Boundary:** Every grant, revocation, authorization, routing decision, and effect transition is Ed25519-signed and SHA-256 hash-chained (`arobi_verify_chain`), while openly declaring the boundary between operator-held local signing keys and multi-tenant hosted ledgers.
+1. **Pre-action authority that does not depend on a model (`arobi_route_grant` + `arobi_authorize`):** Authorization decisions are deterministic and independent of LLM reasoning. They separate advisory model output from execution authority, and `IRREVERSIBLE` effects require a person's recent approval.
+2. **Content-free routing telemetry:** Routing features are reduced to 16 scalar structural counts and shares. Raw prompt text and lease tokens are never written into sealed records.
+3. **Tamper evidence with a stated trust boundary:** Every grant, revocation, authorization, routing decision and effect transition is Ed25519-signed and SHA-256 hash-chained (`arobi_verify_chain`). The README states where the boundary lies: local signing keys belong to the operator's run, while the hosted service keeps records in each workspace's ledger.
 
 ### OpenShell supervisor middleware (`integrations/openshell`)
 
@@ -317,6 +317,27 @@ Immaculate MCP is designed to pair directly with isolated agent execution sandbo
 3. It seals every decision and writes it to disk before the answer goes back.
 
 If the gate is down, OpenShell fails closed. The gate is its own package, with the gRPC dependencies, so the MCP server stays dependency-free. OpenShell's protocol files are not stored here: the gate fetches them at a pinned commit and checks each one by SHA-256.
+
+### SAFE (Shared AI Findings Exchange)
+
+[SAFE](https://github.com/OpenSecureAIAlliance/wg-safe/blob/main/SAFE.md) is the Open Secure AI Alliance working group's compact for reporting AI incidents and near misses (version 1.0, 2026-10-21). It sets out reporting duties, notification timelines, evidence preservation and a review framework.
+
+SAFE is not a product certification. Immaculate reports nothing to SAFE on anyone's behalf. Here is where its grants and sealed records line up with what SAFE asks for:
+
+- **Approved scope.** SAFE defines approved scope as the authorization an accountable principal gives: permitted actions, time limits and delegation limits, which neither a task request nor the agent's own interpretation can expand.
+  - A route grant records the same things: `granted_by`, `delegated_to`, `scope.actions` and `expires_at`.
+  - The server seals it, and `arobi_authorize` honours only grants this server sealed, so an agent cannot write its own grant or widen one.
+- **Authorization at commitment.** SAFE's review checks that a consequential action "matches valid authorization at commitment, including delegation, expiry and revocation".
+  - `arobi_authorize` checks the grant's signature, revocation, expiry and scope before the action, and seals the decision with the grant it checked.
+  - It does not compare the caller with `delegated_to`. The OpenShell gate covers delegation by using only the grant made for the requesting sandbox.
+- **Evidence preservation.** SAFE asks for evidence with stable identifiers, collection times, the actor, links to related events and integrity checks, and with no reusable secrets.
+  - Every sealed record has its hash and sequence number, a timestamp, the previous record's hash and an Ed25519 signature. Authorization records name the principal and the grant.
+  - The OpenShell gate also seals the request id, the sandbox and the originating process. It keeps only digests of paths and queries.
+- **Near misses.** SAFE says "material attempts stopped by another control" are to be assessed as near misses.
+  - The local engine and the OpenShell gate seal every denial and hold with its reason code, for example `ACTION_OUT_OF_SCOPE` or `immaculate_critical_requires_fresh_auth`.
+  - So the operator has the record that assessment needs. Whether an event is reportable, and reporting it, stay the operator's decisions.
+
+SAFE calls for a versioned, machine-readable minimum reporting record. The working group's repository does not publish a schema for it yet (checked 2026-11-28), so Immaculate's records are not in that format.
 
 ---
 
