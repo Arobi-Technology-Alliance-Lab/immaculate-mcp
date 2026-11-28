@@ -1,0 +1,23 @@
+{
+  "listen": "0.0.0.0:50051",
+  "tls": {
+    "cert_path": "tls/gate.pem",
+    "key_path": "tls/gate-key.pem"
+  },
+  "auth": {
+    "gateway_id": "<your gateway id>",
+    "audience": "urn:openshell:extension:middleware:immaculate",
+    "public_key_path": "gateway-signing-public.pem"
+  },
+  "records_dir": "records",
+  "rotate_after_records": 50000,
+  "grants": [
+    {
+      "route_id": "openshell-research",
+      "granted_by": "security-operations",
+      "sandboxes": ["*"],
+      "actions": ["crm.read.*", "mail.send", "payments.refund"],
+      "ttl_hours": 24
+    }
+  ]
+}

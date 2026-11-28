@@ -1,0 +1,11 @@
+# OpenShell gateway configuration: register the Immaculate gate as a supervisor middleware service.
+# The gate decides on the request head only, so it advertises a zero payload limit and needs no body.
+[[openshell.supervisor.middleware]]
+name = "immaculate"
+grpc_endpoint = "https://immaculate-gate.internal:50051"
+tls_ca_cert_path = "/etc/openshell/immaculate-gate-ca.pem"
+max_payload_bytes = 0
+binding_policy = "allowlist"
+bindings = ["http_request_pre_credentials"]
+timeout = "500ms"
+# audience defaults to "urn:openshell:extension:middleware:immaculate"; the gate's auth.audience must match it.
