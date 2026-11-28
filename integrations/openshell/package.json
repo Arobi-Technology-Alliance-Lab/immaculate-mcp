@@ -1,0 +1,25 @@
+{
+  "name": "@arobi/immaculate-openshell-gate",
+  "version": "0.1.0",
+  "description": "Immaculate as an OpenShell supervisor middleware: each request a sandboxed agent sends is authorized by Immaculate before it leaves, fails closed, and leaves a sealed record.",
+  "type": "module",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "bin": {
+    "immaculate-openshell-gate": "./src/cli.mjs"
+  },
+  "scripts": {
+    "fetch-protocol": "node scripts/fetch-protocol.mjs",
+    "prestart": "node scripts/fetch-protocol.mjs",
+    "start": "node src/cli.mjs serve --config gate.json",
+    "pretest": "node scripts/fetch-protocol.mjs",
+    "test": "node --test tests/struct.spec.mjs tests/policy.spec.mjs tests/auth.spec.mjs tests/protocol.spec.mjs tests/gate.spec.mjs tests/server.spec.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "1.14.7",
+    "@grpc/proto-loader": "0.8.1"
+  }
+}

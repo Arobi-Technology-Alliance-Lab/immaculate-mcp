@@ -309,6 +309,15 @@ Immaculate MCP is designed to pair directly with isolated agent execution sandbo
 2. **Content-Free Telemetry & Zero Prompt Retention:** Routing features are reduced to 16 scalar structural counts/shares; raw prompt text and lease tokens are never persisted in sealed records.
 3. **Cryptographic Tamper Evidence & Explicit Trust Boundary:** Every grant, revocation, authorization, routing decision, and effect transition is Ed25519-signed and SHA-256 hash-chained (`arobi_verify_chain`), while openly declaring the boundary between operator-held local signing keys and multi-tenant hosted ledgers.
 
+### OpenShell supervisor middleware (`integrations/openshell`)
+
+[`integrations/openshell`](integrations/openshell/README.md) runs the local engine as an [OpenShell](https://github.com/ai-openshell/openshell) supervisor middleware. Before a sandboxed agent's HTTP request leaves, and before OpenShell adds credentials, the gate does three things:
+1. It classifies the request with the sandbox policy's rules, as an action and a consequence tier.
+2. It authorizes the action against the operator's grant for that sandbox, and answers continue or deny. Critical actions are held for a person.
+3. It seals every decision and writes it to disk before the answer goes back.
+
+If the gate is down, OpenShell fails closed. The gate is its own package, with the gRPC dependencies, so the MCP server stays dependency-free. OpenShell's protocol files are not stored here: the gate fetches them at a pinned commit and checks each one by SHA-256.
+
 ---
 
 ## Optional Managed Cloud Endpoint (Streamable HTTP)
@@ -334,4 +343,4 @@ Teams that want persistent multi-tenant cloud storage, dashboards, and hosted St
 
 Arobi provides technical verification, policy enforcement, and tamper-evident evidence tooling. Arobi is not an insurer or a certification body; licensed insurers, regulators, and independent reviewers retain their own decisions.
 
-Everything in this repository (`src/engine.mjs`, `src/index.mjs`, tests, `Dockerfile`, manifest, and documentation) is proprietary to **Arobi Technology Alliance, Inc.** under the Arobi Proprietary License (see [LICENSE](./LICENSE)), as is the optional hosted service at `https://aura-genesis.org/api/v1/mcp`. Use is governed by the Arobi Terms of Service.
+Everything in this repository (`src/engine.mjs`, `src/index.mjs`, `integrations/openshell`, tests, `Dockerfile`, manifest, and documentation) is proprietary to **Arobi Technology Alliance, Inc.** under the Arobi Proprietary License (see [LICENSE](./LICENSE)), as is the optional hosted service at `https://aura-genesis.org/api/v1/mcp`. Use is governed by the Arobi Terms of Service.

@@ -1,0 +1,13 @@
+{
+  "listen": "127.0.0.1:50051",
+  "allow_insecure_transport": true,
+  "records_dir": "records",
+  "grants": [
+    {
+      "granted_by": "local-developer",
+      "sandboxes": ["*"],
+      "actions": ["crm.read.*", "mail.send"],
+      "ttl_hours": 8
+    }
+  ]
+}

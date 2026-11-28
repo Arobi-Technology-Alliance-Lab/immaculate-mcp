@@ -1,0 +1,35 @@
+# Sandbox policy: send requests to these hosts through the Immaculate gate before credentials are added.
+# Requests to hosts outside endpoints.include never reach the gate; they follow the rest of the network policy.
+network_middlewares:
+  immaculate:
+    middleware: immaculate
+    on_error: fail_closed
+    endpoints:
+      include: ["api.crm.example", "api.payments.example", "*.mail.example"]
+    config:
+      rules:
+        - id: crm-read
+          methods: [GET]
+          hosts: ["api.crm.example"]
+          paths: ["/v1/contacts/*"]
+          action: crm.read.contacts
+          tier: low
+        - id: crm-write
+          methods: [POST, PATCH, DELETE]
+          hosts: ["api.crm.example"]
+          paths: ["/v1/contacts/*"]
+          action: crm.write.contacts
+          tier: medium
+        - id: refunds
+          methods: [POST]
+          hosts: ["api.payments.example"]
+          paths: ["/v1/refunds"]
+          action: payments.refund
+          tier: critical
+        - id: mail
+          methods: [POST]
+          hosts: ["*.mail.example"]
+          paths: ["/send"]
+          action: mail.send
+          tier: high
+      unmatched: deny

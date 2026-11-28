@@ -26,3 +26,14 @@ Proprietary License, the same text as every Arobi repository).
 - **Never weaken the local checks.** `arobi_authorize` honours only grants this server sealed, and
   `arobi_verify_chain` requires one signer and reports whether it was pinned. The tests in `test/` hold both.
 
+## Integrations (2026-11-28)
+
+- `integrations/openshell` is the OpenShell supervisor middleware. It is its own package (`@grpc/grpc-js` and
+  `@grpc/proto-loader`, exact pins), so the MCP server in `src/` keeps zero dependencies. It imports the engine from
+  `src/engine.mjs`: never copy the engine into it.
+- OpenShell's `.proto` files are NVIDIA's, under Apache-2.0: never commit them here. `npm run fetch-protocol` downloads
+  them at the commit pinned in `integrations/openshell/src/protocol.mjs` and checks each one by SHA-256. To move to a
+  newer protocol, change the commit and the digests together, then run that package's tests.
+- Its tests are `integrations/openshell/tests/*.spec.mjs`, run by its own `npm test`. The root `npm test` must not pick
+  them up, because it runs without the integration's dependencies.
+
